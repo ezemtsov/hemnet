@@ -18,9 +18,13 @@ Once the sold dataset exists (see *Sold pipeline* below — that's a monthly thi
 the daily on-sale loop is one command:
 
 ```bash
-./update.sh
-# then reload index.html
+./update.sh        # rebuild index.html from fresh data
+./deploy.sh        # commit + push so GitHub Pages picks up the change
+# or just: ./update.sh && ./deploy.sh
 ```
+
+`deploy.sh` adds, commits and pushes only `index.html`. Data files and caches
+stay local (see `.gitignore`).
 
 `update.sh` does scrape → enrich → geocode → score → rebuild map. Runs in
 ~30s warm-cache, ~3-5 min if many new listings appeared. Same-day re-runs
@@ -83,6 +87,7 @@ on-sale refreshes are smaller still.
 hemnet/
 ├── README.md                              # this file
 ├── update.sh                              # one-shot daily refresh
+├── deploy.sh                              # commit + push index.html to gh-pages
 ├── cdp.py                                 # tiny CDP helper, picks port from $HEMNET_CDP_PORT
 ├── scrape.py                              # list-page scraper, sold + onsale
 ├── enrich.py                              # detail-page enricher, sold + onsale

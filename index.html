@@ -130,7 +130,10 @@ const sorted = [...LISTINGS].sort((a, b) => {
 });
 
 // --- create one marker + one list row per listing, connected ---------------
-const markers = [];   // index-aligned with `sorted`
+// Multiple listings often share a geocode (same building, different floors).
+// Markers are rendered in REVERSE deal-priority order so the best deals end
+// up on top of the stack when they overlap. Sidebar stays in descending order.
+const markers = new Array(sorted.length).fill(null);
 const rows    = [];   // index-aligned with `sorted`
 const listEl  = document.getElementById('list');
 
@@ -149,21 +152,8 @@ function selectIndex(i, { fromMap = false } = {}) {
   }
 }
 
+// Pass 1: build sidebar rows in attractiveness order.
 sorted.forEach((d, i) => {
-  // marker
-  if (d.lat != null && d.lon != null) {
-    const m = L.circleMarker([d.lat, d.lon], {
-      radius: 9, weight: 2, color: 'white',
-      fillColor: dealColor(d.deal_pct), fillOpacity: 0.95
-    }).addTo(map);
-    m.bindPopup(popupHtml(d), { maxWidth: 280 });
-    m.on('popupopen', () => selectIndex(i, { fromMap: true }));
-    markers.push(m);
-  } else {
-    markers.push(null);
-  }
-
-  // sidebar row
   const li = document.createElement('li');
   li.className = 'row';
   const dealLabel = d.deal_pct != null
@@ -185,6 +175,19 @@ sorted.forEach((d, i) => {
   listEl.appendChild(li);
   rows.push(li);
 });
+
+// Pass 2: build markers in REVERSE order (worst deals first, best on top).
+for (let i = sorted.length - 1; i >= 0; i--) {
+  const d = sorted[i];
+  if (d.lat == null || d.lon == null) continue;
+  const m = L.circleMarker([d.lat, d.lon], {
+    radius: 9, weight: 2, color: 'white',
+    fillColor: dealColor(d.deal_pct), fillOpacity: 0.95
+  }).addTo(map);
+  m.bindPopup(popupHtml(d), { maxWidth: 280 });
+  m.on('popupopen', () => selectIndex(i, { fromMap: true }));
+  markers[i] = m;
+}
 
 const pinned = markers.filter(m => m).length;
 document.getElementById('sub').textContent =

@@ -14,7 +14,7 @@ ROOT = Path(__file__).parent
 
 POPUP_FIELDS = (
     "href address area asking_price_kr m2 rooms kr_per_m2 byggar vaning vaning_total "
-    "hiss forening photos lat lon visning predicted_price_kr deal_pct"
+    "hiss forening photos lat lon visning predicted_price_kr deal_pct stadsdel_liquidity"
 ).split()
 
 
@@ -59,6 +59,7 @@ HTML_TEMPLATE = r"""<!doctype html>
   li.row .price { font-size: 13px; color: #666; }
   li.row .addr { font-weight: 600; font-size: 13px; margin-top: 2px;
                  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  li.row .star { color: #e0a012; margin-right: 4px; cursor: help; }
   li.row .area { font-size: 11px; color: #888; }
   li.row .meta { font-size: 11px; color: #555; margin-top: 3px; }
   .popup-photo { width: 240px; height: 160px; object-fit: cover; border-radius: 4px; display: block; }
@@ -85,6 +86,7 @@ HTML_TEMPLATE = r"""<!doctype html>
       <div><span class="leg-swatch" style="background:#e0b020"></span>within ±10% · noise band</div>
       <div><span class="leg-swatch" style="background:#d33030"></span>≥10% over model · priced high</div>
       <div><span class="leg-swatch" style="background:#999"></span>no prediction</div>
+      <div style="margin-top:4px;"><span style="color:#e0a012">★</span> high-liquidity stadsdel (strong resale)</div>
     </div>
   </header>
   <ul id="list"></ul>
@@ -199,9 +201,11 @@ sorted.forEach((d, i) => {
     : `<span class="deal deal-na" style="padding:2px 6px;border-radius:3px;">n/a</span>`;
   const vaning = d.vaning != null
     ? `vån ${d.vaning}${d.vaning_total ? '/' + d.vaning_total : ''}${d.hiss ? ' (hiss)' : ''}` : '';
+  const star = d.stadsdel_liquidity === 'high'
+    ? `<span class="star" title="High-liquidity stadsdel — strong resale">★</span>` : '';
   li.innerHTML = `
     <div class="top">${dealLabel}<span class="price">${fmtKr(d.asking_price_kr)}</span></div>
-    <div class="addr">${d.address ?? ''}</div>
+    <div class="addr">${star}${d.address ?? ''}</div>
     <div class="area">${d.area ?? ''}</div>
     <div class="meta">${fmtM2(d.m2)} · ${d.rooms ?? '–'} rum · ${fmtKr(d.kr_per_m2)}/m² ${vaning ? '· ' + vaning : ''}</div>
   `;

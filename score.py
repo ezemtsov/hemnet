@@ -78,6 +78,34 @@ def fold_rare_stadsdelar(rows_with_features: list[dict], min_count: int = 8) -> 
     return {s for s, c in counts.items() if c >= min_count}
 
 
+def compute_liquidity_tiers(sold_rows: list[dict]) -> dict[str, str]:
+    """Tag each stadsdel as high / medium / low resale liquidity from sold-data signals.
+
+    Definition matches the user's preference (saved in memory):
+    - high: n ≥ 20 AND (% sold over asking ≥ 65% OR n ≥ 60)  → ⭐ in sidebar
+    - medium: n ≥ 10 AND % over asking ≥ 50%
+    - low: everything else (or insufficient sample)
+    """
+    by_s: dict[str, list[int]] = {}
+    for r in sold_rows:
+        diff = r.get("price_diff_pct")
+        if diff is None:
+            continue
+        s = normalize_stadsdel(r.get("area"))
+        by_s.setdefault(s, []).append(diff)
+    tiers: dict[str, str] = {}
+    for s, diffs in by_s.items():
+        n = len(diffs)
+        pct_over = sum(1 for d in diffs if d > 0) / n * 100
+        if n >= 20 and (pct_over >= 65 or n >= 60):
+            tiers[s] = "high"
+        elif n >= 10 and pct_over >= 50:
+            tiers[s] = "medium"
+        else:
+            tiers[s] = "low"
+    return tiers
+
+
 def compute_medians(rows: list[dict]) -> dict:
     """Per-stadsdel medians for byggar/vaning/avgift/hiss + a global fallback."""
     by_stadsdel: dict = {}
@@ -223,14 +251,22 @@ def run(sold_path: str, onsale_path: str, out_path: str | None = None):
     pred_log, beta = fit_and_predict(sold_features, log_y, onsale_features, stadsdel_levels, medians)
     predicted_price = np.exp(pred_log)
 
+    # --- liquidity tiers from sold (used downstream by build_map.py) ------
+    liquidity = compute_liquidity_tiers(sold_rows)
+
     # --- write scored output ----------------------------------------------
     out_path_p = Path(out_path) if out_path else Path(onsale_path).with_suffix(".scored.jsonl")
     scored = []
-    for (row, _), p in zip(onsale_feat_pairs, predicted_price):
+    for (row, f), p in zip(onsale_feat_pairs, predicted_price):
         asking = row.get("asking_price_kr")
         deal_pct = (p - asking) / asking * 100 if asking else None
         row["predicted_price_kr"] = int(round(float(p)))
         row["deal_pct"] = round(float(deal_pct), 1) if deal_pct is not None else None
+        # tier is for the on-sale listing's own stadsdel; use the pre-fold
+        # normalized name so sub-areas map back to their parent tier when
+        # the parent itself is high-liquidity.
+        own_s = normalize_stadsdel(row.get("area"))
+        row["stadsdel_liquidity"] = liquidity.get(own_s, "low")
         scored.append(row)
 
     with open(out_path_p, "w") as f:

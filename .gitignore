@@ -1,0 +1,13 @@
+# Caches and derived data — always regenerable from scrape + Nominatim.
+cache/
+data/
+
+# Python bytecode
+__pycache__/
+*.pyc
+
+# Editor / OS detritus
+.DS_Store
+*.swp
+.idea/
+.vscode/

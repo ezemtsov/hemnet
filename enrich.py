@@ -97,6 +97,32 @@ def kind_of(url: str) -> str:
     return "sold" if "/salda/" in url else "onsale"
 
 
+# Bostadstyp fallback: ~2% of onsale detail pages don't render the explicit
+# "Bostadstyp" label, so parse_facts leaves the field None. The description
+# usually names the type ("välkommen till denna radhus..."); failing that,
+# the Hemnet URL encodes it as the path segment after /bostad/.
+_BOSTADSTYP_DESC_PATTERNS = [
+    (re.compile(r"\b(parvilla|parhus)\b", re.I),     "Parhus"),
+    (re.compile(r"\b(kedjehus|kedjevilla)\b", re.I), "Kedjehus"),
+    (re.compile(r"\b(gavelradhus|radhus)\b", re.I),  "Radhus"),
+    (re.compile(r"\bvilla\b", re.I),                 "Villa"),
+    (re.compile(r"\b(lägenhet|lägenheten)\b", re.I), "Lägenhet"),
+]
+_BOSTADSTYP_URL_HINT = {
+    "lagenhet": "Lägenhet", "villa": "Villa", "radhus": "Radhus",
+    "parhus": "Parhus",     "kedjehus": "Kedjehus",
+}
+
+
+def infer_bostadstyp(url: str | None, description: str | None) -> str | None:
+    if description:
+        for rx, label in _BOSTADSTYP_DESC_PATTERNS:
+            if rx.search(description):
+                return label
+    m = re.search(r"/bostad/([a-z]+)-", url or "")
+    return _BOSTADSTYP_URL_HINT.get(m.group(1)) if m else None
+
+
 def listing_id(url: str) -> str:
     """Extract trailing numeric id from a Hemnet listing URL.
 
@@ -234,11 +260,16 @@ def merge_row_with_facts(row: dict, facts: dict) -> dict:
 
     Fresh row values win when both have the field AND row's value is non-null.
     This keeps daily on-sale price changes from being shadowed by stale cache.
+    Also fills bostadstyp from description/URL when the detail page omitted it.
     """
     out = dict(facts)
     for k, v in row.items():
         if v is not None or k not in out:
             out[k] = v
+    if not out.get("bostadstyp"):
+        inferred = infer_bostadstyp(out.get("href"), out.get("description"))
+        if inferred:
+            out["bostadstyp"] = inferred
     return out
 
 

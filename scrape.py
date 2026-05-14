@@ -1,8 +1,9 @@
-"""Scrape Hemnet list pages — Slutpriser (sold) or Bostäder till salu (on-sale).
+"""Scrape Hemnet list pages — Slutpriser (sold), kommande, or Bostäder till salu.
 
 The kind is auto-detected from the URL path:
-    /salda/bostader → sold pipeline    (data/sold-YYYY-MM-DD.jsonl)
-    /bostader       → on-sale pipeline (data/onsale-YYYY-MM-DD.jsonl)
+    /salda/bostader     → sold pipeline      (data/sold-YYYY-MM-DD.jsonl)
+    /kommande/bostader  → kommande pipeline  (data/kommande-YYYY-MM-DD.jsonl)
+    /bostader           → on-sale pipeline   (data/onsale-YYYY-MM-DD.jsonl)
 
 For the on-sale Chromium instance, set HEMNET_CDP_PORT=9223 (default 9222 = sold).
 
@@ -14,7 +15,7 @@ import argparse, json, time, re
 from datetime import date
 from cdp import CDP, find_tab
 
-CARD_SEL = '[data-testid="result-list"] [class*="ListingCardContainer_cardWrapper"]'
+CARD_SEL = '[class*="ListingCardContainer_cardWrapper"]'
 WAIT_JS = f"document.querySelectorAll({json.dumps(CARD_SEL)}).length"
 EXTRACT_JS = (
     "(() => [...document.querySelectorAll(" + json.dumps(CARD_SEL) + ")]"
@@ -37,8 +38,10 @@ def num(s):
 
 
 def kind_of(url: str) -> str:
-    """Return 'sold' for Slutpriser URLs, 'onsale' for active listing URLs."""
-    return "sold" if "/salda/" in url else "onsale"
+    """Return 'sold' / 'kommande' / 'onsale' based on the list-page URL path."""
+    if "/salda/" in url:    return "sold"
+    if "/kommande/" in url: return "kommande"
+    return "onsale"
 
 
 def parse_card_sold(href: str, text: str) -> dict[str, object]:
@@ -256,6 +259,7 @@ def scrape(url: str, out_path: str, *, max_pages: int = 50, delay_s: float = 1.5
                 # ready-to-use apartments only.
                 if "Nyproduktion" in rec.get("promotions", []):
                     continue
+                rec["status"] = kind  # carries through to build_map filter UI
                 rec["scraped_page"] = page
                 f.write(json.dumps(rec, ensure_ascii=False) + "\n")
                 total += 1; new += 1

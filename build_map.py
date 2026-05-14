@@ -15,7 +15,7 @@ ROOT = Path(__file__).parent
 POPUP_FIELDS = (
     "href address area asking_price_kr m2 rooms kr_per_m2 byggar vaning vaning_total "
     "hiss forening photos lat lon visning predicted_price_kr deal_pct stadsdel_liquidity "
-    "bostadstyp"
+    "bostadstyp status"
 ).split()
 
 
@@ -47,7 +47,8 @@ HTML_TEMPLATE = r"""<!doctype html>
   }
   #sidebar header h1 { font-size: 14px; margin: 0; font-weight: 600; }
   #sidebar header .sub { font-size: 11px; color: #888; margin-top: 2px; }
-  #filters { display: flex; gap: 6px; margin-top: 8px; }
+  #filters { display: flex; flex-direction: column; gap: 5px; margin-top: 8px; }
+  .filter-group { display: flex; gap: 6px; }
   .filter-btn {
     display: inline-flex; align-items: center; gap: 5px;
     padding: 4px 8px; height: 26px; box-sizing: border-box;
@@ -245,7 +246,8 @@ for (let i = sorted.length - 1; i >= 0; i--) {
   const d = sorted[i];
   if (d.lat == null || d.lon == null) continue;
   const m = L.circleMarker([d.lat, d.lon], {
-    radius: 9, weight: 2, color: 'white',
+    radius: 9, weight: 2,
+    color: d.status === 'kommande' ? '#222' : 'white',
     fillColor: dealColor(d.deal_pct), fillOpacity: 0.95
   }).addTo(map);
   m.bindPopup(popupHtml(d), { maxWidth: 280, autoPan: false });
@@ -270,15 +272,45 @@ TYPE_GROUPS.forEach(g => g.matches.forEach(t => groupOf.set(t, g.key)));
 // All groups active by default — clicking a button toggles its group off.
 const selectedGroups = new Set(TYPE_GROUPS.map(g => g.key));
 
-// Render filter buttons with per-group counts.
-const filtersEl = document.getElementById('filters');
-const groupCounts = {};
+const STATUS_FILTERS = [
+  { key: 'onsale',   label: 'Till salu' },
+  { key: 'kommande', label: 'Kommande' },
+];
+const selectedStatuses = new Set(STATUS_FILTERS.map(s => s.key));
+
+// Pre-compute counts.
+const groupCounts = {}, statusCounts = {};
 sorted.forEach(d => {
   const g = groupOf.get(d.bostadstyp);
   if (g) groupCounts[g] = (groupCounts[g] || 0) + 1;
+  const s = d.status || 'onsale';
+  statusCounts[s] = (statusCounts[s] || 0) + 1;
 });
+
+// Render two filter rows: property type (with icons) and status (text-only).
+const filtersEl = document.getElementById('filters');
+const typeRow   = document.createElement('div'); typeRow.className   = 'filter-group';
+const statusRow = document.createElement('div'); statusRow.className = 'filter-group';
+filtersEl.appendChild(typeRow);
+filtersEl.appendChild(statusRow);
+
+function makeFilterButton(label, count, selectedSet, key, iconHtml) {
+  const btn = document.createElement('button');
+  btn.className = 'filter-btn active';
+  btn.title = `Toggle ${label}`;
+  btn.innerHTML = `${iconHtml || ''}<span>${label}</span><span class="count">${count}</span>`;
+  btn.addEventListener('click', () => {
+    if (selectedSet.has(key)) selectedSet.delete(key);
+    else selectedSet.add(key);
+    btn.classList.toggle('active');
+    updateVisibility();
+  });
+  return btn;
+}
+
 TYPE_GROUPS.forEach(g => {
   if (!groupCounts[g.key]) return;
+  // Icon-only for property type (label suppressed) — keeps the row compact.
   const btn = document.createElement('button');
   btn.className = 'filter-btn active';
   btn.title = `Toggle ${g.label}`;
@@ -289,14 +321,20 @@ TYPE_GROUPS.forEach(g => {
     btn.classList.toggle('active');
     updateVisibility();
   });
-  filtersEl.appendChild(btn);
+  typeRow.appendChild(btn);
+});
+STATUS_FILTERS.forEach(s => {
+  if (!statusCounts[s.key]) return;
+  statusRow.appendChild(makeFilterButton(s.label, statusCounts[s.key], selectedStatuses, s.key));
 });
 
 function passesTypeFilter(d) {
   const g = groupOf.get(d.bostadstyp);
   if (g) return selectedGroups.has(g);
-  // Unknown bostadstyp — show only when no filter is actively excluding (all on).
   return selectedGroups.size === TYPE_GROUPS.length;
+}
+function passesStatusFilter(d) {
+  return selectedStatuses.has(d.status || 'onsale');
 }
 
 // Hide sidebar rows that fall outside the current map viewport or don't
@@ -307,16 +345,16 @@ function updateVisibility() {
   let visible = 0;
   for (let i = 0; i < sorted.length; i++) {
     const d = sorted[i], row = rows[i], marker = markers[i];
-    const typeOk = passesTypeFilter(d);
+    const filterOk = passesTypeFilter(d) && passesStatusFilter(d);
     if (marker) {
       const onMap = map.hasLayer(marker);
-      if (typeOk && !onMap) marker.addTo(map);
-      else if (!typeOk && onMap) map.removeLayer(marker);
+      if (filterOk && !onMap) marker.addTo(map);
+      else if (!filterOk && onMap) map.removeLayer(marker);
     }
     if (!row) continue;
     const hasCoords = d.lat != null && d.lon != null;
     const inBounds = !hasCoords || bounds.contains([d.lat, d.lon]);
-    const show = inBounds && typeOk;
+    const show = inBounds && filterOk;
     row.style.display = show ? '' : 'none';
     if (show) visible++;
   }

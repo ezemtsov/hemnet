@@ -19,6 +19,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 ONSALE_URL="${ONSALE_URL:-https://www.hemnet.se/bostader?price_max=8000000&living_area_min=60&rooms_min=2.5&location_ids%5B%5D=18031}"
+KOMMANDE_URL="${KOMMANDE_URL:-https://www.hemnet.se/kommande/bostader?price_max=8000000&living_area_min=60&rooms_min=2.5&location_ids%5B%5D=18031}"
 CDP_PORT="${CDP_PORT:-9223}"
 USER_DATA="${USER_DATA:-/tmp/chromium-onsale}"
 PARALLEL="${PARALLEL:-1}"
@@ -103,6 +104,28 @@ echo
 echo "▸ geocode"
 python3 geocode.py "${ENRICHED_JSONL}"
 
+# Kommande pipeline — typically far fewer listings (~30-50), so always
+# sequential, single Chromium. Detail pages share the onsale cache namespace
+# (set in enrich.py CACHE_NAMESPACE) since their URL/structure is identical.
+KOMMANDE_JSONL="data/kommande-${DATE}.jsonl"
+KOMMANDE_ENRICHED="data/kommande-${DATE}.enriched.jsonl"
+echo
+echo "▸ scrape kommande"
+HEMNET_CDP_PORT="${CDP_PORT}" python3 scrape.py --url "${KOMMANDE_URL}"
+echo
+echo "▸ enrich kommande"
+HEMNET_CDP_PORT="${CDP_PORT}" python3 enrich.py "${KOMMANDE_JSONL}"
+echo
+echo "▸ geocode kommande"
+python3 geocode.py "${KOMMANDE_ENRICHED}"
+
+# Merge onsale + kommande into one live snapshot for scoring and map build.
+LIVE_GEO="data/live-${DATE}.enriched.geo.jsonl"
+cat "data/onsale-${DATE}.enriched.geo.jsonl" \
+    "data/kommande-${DATE}.enriched.geo.jsonl" > "${LIVE_GEO}"
+echo
+echo "▸ merged onsale + kommande → ${LIVE_GEO} ($(wc -l < "${LIVE_GEO}") rows)"
+
 # Pick the most recent sold snapshot for scoring. Prefer the geocoded
 # (.enriched.geo.jsonl) variant since score.py uses the lat/lon k-NN
 # resolver at predict time.
@@ -116,11 +139,11 @@ if [[ -z "${SOLD}" ]]; then
 fi
 echo
 echo "▸ score (against $(basename "${SOLD}"))"
-python3 score.py --sold "${SOLD}" --onsale "data/onsale-${DATE}.enriched.geo.jsonl"
+python3 score.py --sold "${SOLD}" --onsale "${LIVE_GEO}"
 
 echo
 echo "▸ build map"
-python3 build_map.py "data/onsale-${DATE}.enriched.geo.scored.jsonl"
+python3 build_map.py "data/live-${DATE}.enriched.geo.scored.jsonl"
 
 echo
 echo "✓ done.  open  file://$(pwd)/index.html"

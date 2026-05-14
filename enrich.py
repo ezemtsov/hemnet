@@ -24,7 +24,11 @@ from pathlib import Path
 from cdp import CDP, find_tab
 
 CACHE_ROOT = Path(__file__).parent / "cache" / "details"
-DEFAULT_CACHE_TTL_H = {"sold": None, "onsale": 18}
+DEFAULT_CACHE_TTL_H = {"sold": None, "onsale": 18, "kommande": 18}
+# Kommande detail pages have the same structure and URLs as onsale; share the
+# cache namespace so a listing that transitions from kommande → onsale doesn't
+# get re-fetched.
+CACHE_NAMESPACE = {"sold": "sold", "onsale": "onsale", "kommande": "onsale"}
 
 
 # ---- Sold listings ---------------------------------------------------------
@@ -94,7 +98,9 @@ def num(s, *, allow_decimal=False):
 
 
 def kind_of(url: str) -> str:
-    return "sold" if "/salda/" in url else "onsale"
+    if "/salda/" in url:    return "sold"
+    if "/kommande/" in url: return "kommande"
+    return "onsale"
 
 
 # Bostadstyp fallback: ~2% of onsale detail pages don't render the explicit
@@ -290,8 +296,11 @@ def enrich(in_path_str: str, out_path_str: str | None = None, *,
     rows = [json.loads(l) for l in open(in_path)]
     if not rows:
         print(f"empty input {in_path}"); return
-    kind = "sold" if "sold" in in_path.name else ("onsale" if "onsale" in in_path.name else kind_of(rows[0]["href"]))
-    cache_dir = CACHE_ROOT / kind
+    if   "kommande" in in_path.name: kind = "kommande"
+    elif "sold"     in in_path.name: kind = "sold"
+    elif "onsale"   in in_path.name: kind = "onsale"
+    else:                            kind = kind_of(rows[0]["href"])
+    cache_dir = CACHE_ROOT / CACHE_NAMESPACE[kind]
     cache_dir.mkdir(parents=True, exist_ok=True)
 
     ttl_h = cache_ttl_hours if cache_ttl_hours is not None else DEFAULT_CACHE_TTL_H.get(kind)

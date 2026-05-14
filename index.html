@@ -190,8 +190,26 @@ for (let i = sorted.length - 1; i >= 0; i--) {
 }
 
 const pinned = markers.filter(m => m).length;
-document.getElementById('sub').textContent =
-  `${sorted.length} listings · ${pinned} pinned · sorted by deal score`;
+const subEl  = document.getElementById('sub');
+
+// Hide sidebar rows whose lat/lon falls outside the current map viewport.
+// Listings without coordinates have nothing to filter by — keep them shown.
+function updateListVisibility() {
+  const bounds = map.getBounds();
+  let visible = 0;
+  for (let i = 0; i < sorted.length; i++) {
+    const d = sorted[i], row = rows[i];
+    if (!row) continue;
+    const hasCoords = d.lat != null && d.lon != null;
+    const inView = !hasCoords || bounds.contains([d.lat, d.lon]);
+    row.style.display = inView ? '' : 'none';
+    if (inView) visible++;
+  }
+  subEl.textContent = `${visible} of ${sorted.length} in view · ${pinned} pinned · sorted by deal score`;
+}
+map.on('moveend', updateListVisibility);
+updateListVisibility();
+
 document.title = `Hemnet — ${sorted.length} onsale`;
 </script>
 </body>

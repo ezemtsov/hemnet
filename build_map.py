@@ -107,6 +107,16 @@ L.tileLayer(
   { maxZoom: 19, attribution: '&copy; Esri, OpenStreetMap contributors' }
 ).addTo(map);
 
+// T-bana station overlay — small dots with name tooltips. Rendered before
+// listing markers so deal pins stay on top.
+const TBANA = __TBANA__;
+TBANA.stations.forEach(s => {
+  L.circleMarker([s.lat, s.lon], {
+    radius: 3.5, color: '#fff', weight: 1.5,
+    fillColor: '#222', fillOpacity: 1,
+  }).bindTooltip(s.name, { direction: 'top', offset: [0, -4] }).addTo(map);
+});
+
 const fmtKr = n => n == null ? '–' : n.toLocaleString('sv-SE') + ' kr';
 const fmtM2 = n => n == null ? '–' : Math.round(n) + ' m²';
 
@@ -252,7 +262,12 @@ def build(in_path_str: str, out_path_str: str | None = None):
     pinned = [trim_row(r) for r in rows if r.get("lat") is not None]
     skipped = len(rows) - len(pinned)
     payload = json.dumps(pinned, ensure_ascii=False, separators=(",", ":"))
-    html = HTML_TEMPLATE.replace("__DATA__", payload)
+
+    # T-bana overlay data. Run `python3 fetch_tbana.py` to regenerate.
+    tbana_path = ROOT / "tbana.json"
+    tbana_payload = tbana_path.read_text() if tbana_path.exists() else '{"lines":[],"stations":[]}'
+
+    html = HTML_TEMPLATE.replace("__DATA__", payload).replace("__TBANA__", tbana_payload)
     out_path.write_text(html)
     size_kb = out_path.stat().st_size / 1024
     print(f"wrote {out_path}  ({len(pinned)} pinned, {skipped} skipped, {size_kb:.1f} KB)")

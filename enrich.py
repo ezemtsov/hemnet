@@ -324,7 +324,9 @@ def enrich(in_path_str: str, out_path_str: str | None = None, *,
                 if facts is None:
                     failed += 1
                     print(f"[{i}/{len(rows)}] TIMEOUT {url}", flush=True)
-                    f.write(json.dumps(row, ensure_ascii=False) + "\n")
+                    # Still apply the merge so bostadstyp inference from URL /
+                    # description runs even when the detail page failed to load.
+                    f.write(json.dumps(merge_row_with_facts(row, {}), ensure_ascii=False) + "\n")
                     continue
                 cache_path.write_text(json.dumps(facts, ensure_ascii=False))
                 misses += 1

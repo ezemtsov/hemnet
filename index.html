@@ -12,6 +12,24 @@
   #sidebar { width: 380px; flex: 0 0 380px; height: 100%; overflow-y: auto;
              border-right: 1px solid #ddd; background: #fafafa; }
   #map { flex: 1; height: 100%; }
+  #mobile-toggle { display: none; }
+  @media (max-width: 720px) {
+    #sidebar {
+      position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+      width: auto; flex: none; z-index: 10;
+      transform: translateX(-100%);
+      transition: transform 0.2s ease;
+    }
+    body.show-sidebar #sidebar { transform: translateX(0); }
+    #mobile-toggle {
+      display: block;
+      position: fixed; top: 10px; right: 10px; z-index: 20;
+      background: #fff; border: 1px solid #ccc; border-radius: 4px;
+      padding: 7px 11px; font: 600 13px -apple-system, system-ui, sans-serif;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.15);
+      cursor: pointer; min-width: 80px;
+    }
+  }
   #sidebar header {
     position: sticky; top: 0; background: white; padding: 10px 14px;
     border-bottom: 1px solid #eee; z-index: 5;
@@ -106,6 +124,7 @@
   <ul id="list"></ul>
 </aside>
 <div id="map"></div>
+<button id="mobile-toggle" type="button">≡ List</button>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
         integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
@@ -460,6 +479,19 @@ map.on('moveend', updateVisibility);
 updateVisibility();
 
 document.title = `Hemnet — ${sorted.length} onsale`;
+
+// Mobile sidebar toggle. CSS hides #mobile-toggle on wider screens, so the
+// listener is harmless there. Tapping flips body.show-sidebar; the sidebar
+// translates in and the button label swaps map ↔ list.
+const toggleBtn = document.getElementById('mobile-toggle');
+toggleBtn.addEventListener('click', () => {
+  const shown = document.body.classList.toggle('show-sidebar');
+  toggleBtn.textContent = shown ? '✕ Map' : '≡ List';
+  // After hiding the sidebar, give Leaflet a tick to notice the resize.
+  if (!shown) setTimeout(() => map.invalidateSize(), 250);
+});
+// Also resync the map after orientation changes / window resizes.
+window.addEventListener('resize', () => map.invalidateSize());
 </script>
 </body>
 </html>

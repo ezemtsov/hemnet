@@ -480,7 +480,7 @@ def run(sold_path: str, onsale_path: str, out_path: str | None = None):
             region = region_of(row.get("area"))
         key = model_key_for(row, region)
         if key is None:
-            continue  # unknown bostadstyp — skip rather than mispredict
+            continue
         model = models[key]
         pred = predict_one(model, row, resolved_stadsdel=resolved_sd)
         if pred is None:
@@ -496,6 +496,7 @@ def run(sold_path: str, onsale_path: str, out_path: str | None = None):
         own_s = normalize_stadsdel(row.get("area"))
         row["stadsdel_liquidity"] = liquidity.get(own_s, "low")
         scored.append(row)
+
 
     out_path_p = Path(out_path) if out_path else Path(onsale_path).with_suffix(".scored.jsonl")
     with open(out_path_p, "w") as f:

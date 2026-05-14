@@ -175,13 +175,13 @@ function selectIndex(i, { fromMap = false } = {}) {
   const row = rows[i], marker = markers[i];
   if (row) {
     row.classList.add('active');
-    if (!fromMap) row.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
-    else          row.scrollIntoView({ block: 'nearest' });
+    row.scrollIntoView({ block: 'nearest' });
   }
-  if (marker) {
-    map.setView(marker.getLatLng(), Math.max(map.getZoom(), 14), { animate: true });
-    marker.openPopup();
-  }
+  // Map is a geo-filter context (bounds determine which rows show), so
+  // row selection must NOT move it. The bounds filter guarantees a
+  // visible row's pin is already in view; openPopup with autoPan:false
+  // just opens it where it is.
+  if (marker) marker.openPopup();
 }
 
 // Pass 1: build sidebar rows in attractiveness order.
@@ -219,7 +219,7 @@ for (let i = sorted.length - 1; i >= 0; i--) {
     radius: 9, weight: 2, color: 'white',
     fillColor: dealColor(d.deal_pct), fillOpacity: 0.95
   }).addTo(map);
-  m.bindPopup(popupHtml(d), { maxWidth: 280 });
+  m.bindPopup(popupHtml(d), { maxWidth: 280, autoPan: false });
   m.on('popupopen', () => selectIndex(i, { fromMap: true }));
   markers[i] = m;
 }

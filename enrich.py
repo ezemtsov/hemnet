@@ -88,6 +88,18 @@ NAME_MAP_ONSALE = {
 }
 
 
+# BRF section is BELOW the main facts panel (after Visningstider/Räkna),
+# so the standard extract_facts slice misses it. Extracted separately
+# from the full body. Equally applicable to sold and onsale listings.
+LABELS_BRF = ["Äkta förening", "Antal lägenheter", "Årsavgift", "Belåning"]
+NAME_MAP_BRF = {
+    "Äkta förening":    "brf_akta_raw",        # value usually "Äger marken"
+    "Antal lägenheter": "_brf_n_lgh_raw",
+    "Årsavgift":        "_brf_arsavgift_raw",  # "458 kr/m²"
+    "Belåning":         "_brf_belaning_raw",   # "7 kr/m²" (= per-m² debt)
+}
+
+
 def num(s, *, allow_decimal=False):
     if s is None: return None
     s = s.replace("\xa0", " ").replace(" ", "").replace(",", "." if allow_decimal else "")
@@ -154,6 +166,38 @@ def extract_facts(body_text: str, labels: list[str]) -> dict:
                     raw[l] = lines[j]
                     break
     return raw
+
+
+def extract_brf_facts(body_text: str) -> dict:
+    """Pull BRF financial labels from the full page body. They live below the
+    main facts panel (after Visningstider / Räkna på ditt nya boende), which
+    extract_facts slices off — so we scan the full body, scoped by the labels
+    being unique enough not to false-match."""
+    lines = [l.strip() for l in body_text.split("\n")]
+    raw: dict[str, str] = {}
+    for i, l in enumerate(lines):
+        if l in LABELS_BRF and l not in raw:
+            for j in range(i + 1, min(i + 4, len(lines))):
+                if lines[j]:
+                    raw[l] = lines[j]
+                    break
+    return raw
+
+
+def parse_brf_facts(raw: dict) -> dict:
+    out: dict = {NAME_MAP_BRF[k]: v for k, v in raw.items() if k in NAME_MAP_BRF}
+    if (s := out.pop("brf_akta_raw", None)):
+        # Hemnet shows "Äger marken" when the BRF is äkta and owns the land
+        # (no tomträtt). Tomträtt BRFs show "Tomträtt" in this slot.
+        out["brf_akta"] = "äger marken" in s.lower()
+        out["brf_marknad_raw"] = s
+    if (s := out.pop("_brf_n_lgh_raw", None)):
+        out["brf_n_lgh"] = num(s)
+    if (s := out.pop("_brf_arsavgift_raw", None)):
+        out["brf_arsavgift_kr_m2"] = num(s.replace("kr/m²", ""))
+    if (s := out.pop("_brf_belaning_raw", None)):
+        out["brf_belaning_kr_m2"] = num(s.replace("kr/m²", ""))
+    return out
 
 
 def parse_facts(raw: dict, kind: str) -> dict:
@@ -258,6 +302,7 @@ def fetch_facts(cdp: CDP, url: str, kind: str, *, timeout_s: float = 21.0) -> di
             time.sleep(0.3)
             body = cdp.eval("document.body.innerText")
             facts = parse_facts(extract_facts(body, labels), kind)
+            facts.update(parse_brf_facts(extract_brf_facts(body)))
             facts["photos"] = extract_photos(cdp.eval(PHOTOS_JS) or [])
             return facts
     return None

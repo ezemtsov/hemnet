@@ -15,7 +15,8 @@ ROOT = Path(__file__).parent
 POPUP_FIELDS = (
     "href address area asking_price_kr m2 rooms kr_per_m2 byggar vaning vaning_total "
     "hiss forening photos lat lon visning predicted_price_kr deal_pct stadsdel_liquidity "
-    "bostadstyp status"
+    "bostadstyp status "
+    "brf_akta brf_n_lgh brf_arsavgift_kr_m2 brf_belaning_kr_m2"
 ).split()
 
 
@@ -64,8 +65,9 @@ HTML_TEMPLATE = r"""<!doctype html>
   li.row { padding: 10px 14px; border-bottom: 1px solid #eee; cursor: pointer; transition: background .12s; }
   li.row:hover { background: #f0f4fa; }
   li.row.active { background: #e3edff; }
-  li.row .top { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+  li.row .top { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
   li.row .deal { font-weight: 700; font-size: 13px; flex-shrink: 0; }
+  .gauge { vertical-align: middle; }
   li.row .price { font-size: 13px; color: #666; }
   li.row .addr { font-weight: 600; font-size: 13px; margin-top: 2px;
                  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -73,18 +75,58 @@ HTML_TEMPLATE = r"""<!doctype html>
   li.row .ptype { color: #777; margin-right: 5px; vertical-align: -2px; cursor: help; }
   li.row .area { font-size: 11px; color: #888; }
   li.row .meta { font-size: 11px; color: #555; margin-top: 3px; }
-  .popup-photo { width: 240px; height: 160px; object-fit: cover; border-radius: 4px; display: block; }
-  .popup-title { font-weight: 600; margin: 6px 0 2px; }
-  .popup-area { color: #666; font-size: 12px; margin-bottom: 6px; }
-  .popup-price { font-size: 16px; font-weight: 600; color: #d34; }
-  .popup-meta { font-size: 12px; color: #555; margin: 4px 0; }
+  .popup-photo { width: 260px; height: 160px; object-fit: cover; border-radius: 4px; display: block; }
+  .popup-section { padding: 8px 0; border-top: 1px solid #eee; }
+  .popup-section:first-of-type { border-top: 0; padding-top: 6px; }
+  .popup-title { font-weight: 600; font-size: 14px; margin-bottom: 2px; }
+  .popup-area { color: #888; font-size: 11px; }
+  .popup-price-row { display: flex; justify-content: space-between; align-items: center; margin-top: 6px; }
+  .popup-price { font-size: 16px; font-weight: 600; }
+  .popup-deal { display: inline-block; padding: 2px 8px; border-radius: 4px; font-weight: 600; font-size: 12px; }
+  .popup-meta { font-size: 12px; color: #555; line-height: 1.5; }
   .popup-meta b { color: #222; }
-  .popup-link { display: inline-block; margin-top: 6px; font-size: 12px; }
-  .popup-deal { display: inline-block; padding: 2px 8px; border-radius: 4px; font-weight: 600; font-size: 12px; margin-top: 4px; }
+  .popup-brf-head { font-size: 12px; color: #444; margin-bottom: 6px; }
+  .popup-brf-stats { display: flex; gap: 6px; }
+  .brf-stat { flex: 1; text-align: center; font-size: 11px; color: #666; }
+  .brf-stat .brf-val { font-weight: 600; color: #222; }
+  .brf-stat .brf-cap { display: block; color: #888; font-size: 10px; margin-top: 1px; }
+  .popup-footer { font-size: 11px; color: #666; margin-top: 4px; display: flex; justify-content: space-between; align-items: center; }
+  .popup-link { font-size: 11px; color: #2a6df4; text-decoration: none; }
+  .popup-link:hover { text-decoration: underline; }
   .deal-na   { background: #eee;    color: #777; }
 </style>
 </head>
 <body>
+<!-- Shared SVG gradient defs for the BRF gauges. Three-zone hard stops
+     at p25/p75 thresholds, anchored at the per-metric scale_max. -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <linearGradient id="g-belaning" x1="0" x2="100%">
+      <stop offset="0%"    stop-color="#1f9930"/>
+      <stop offset="22.7%" stop-color="#1f9930"/>
+      <stop offset="22.7%" stop-color="#bea423"/>
+      <stop offset="64.7%" stop-color="#bea423"/>
+      <stop offset="64.7%" stop-color="#b71f1f"/>
+      <stop offset="100%"  stop-color="#b71f1f"/>
+    </linearGradient>
+    <linearGradient id="g-arsavgift" x1="0" x2="100%">
+      <stop offset="0%"    stop-color="#1f9930"/>
+      <stop offset="54.7%" stop-color="#1f9930"/>
+      <stop offset="54.7%" stop-color="#bea423"/>
+      <stop offset="71.5%" stop-color="#bea423"/>
+      <stop offset="71.5%" stop-color="#b71f1f"/>
+      <stop offset="100%"  stop-color="#b71f1f"/>
+    </linearGradient>
+    <linearGradient id="g-nlgh" x1="0" x2="100%">
+      <stop offset="0%"    stop-color="#bea423"/>
+      <stop offset="13%"   stop-color="#bea423"/>
+      <stop offset="13%"   stop-color="#888"/>
+      <stop offset="46.6%" stop-color="#888"/>
+      <stop offset="46.6%" stop-color="#1f9930"/>
+      <stop offset="100%"  stop-color="#1f9930"/>
+    </linearGradient>
+  </defs>
+</svg>
 <aside id="sidebar">
   <header>
     <h1 id="title">On-sale listings</h1>
@@ -163,29 +205,107 @@ const BOSTADSTYP_ICON = {
   'Par-/kedje-/radhus': PROPERTY_ICON_SVG.row,
 };
 
+// BRF metric thresholds — anchored at p25/p75 of today's Stockholm apartment
+// dataset (n≈250-400 per metric). Hardcoded; recompute against the sold/
+// onsale data if/when the distribution shifts.
+const BRF_T = {
+  belaning:  { good_max:  3400, bad_min:  9700, scale_max: 15000 }, // kr/m² (lower better)
+  arsavgift: { good_max:   711, bad_min:   930, scale_max:  1300 }, // kr/m² (lower better)
+  nlgh:      { warn_max:    65,  good_min:  233, scale_max:   500 }, // count (mid normal; large = stable)
+};
+const COLOR_GOOD = '#1e6e26', COLOR_BAD = '#a02020', COLOR_WARN = '#8a6d00', COLOR_NEUTRAL = '#555';
+
+function brfNumColor(value, kind) {
+  if (value == null) return COLOR_NEUTRAL;
+  const t = BRF_T[kind];
+  if (kind === 'nlgh')  return value <  t.warn_max ? COLOR_WARN : value >= t.good_min ? COLOR_GOOD : COLOR_NEUTRAL;
+  return value <= t.good_max ? COLOR_GOOD : value > t.bad_min ? COLOR_BAD : COLOR_NEUTRAL;
+}
+
+// Speedometer-style arc gauge. Gradient defs (#g-belaning / #g-arsavgift /
+// #g-nlgh) live once in <body>; each call returns a 22×22 inline SVG.
+function gaugeSvg(value, kind) {
+  if (value == null) return '';
+  const t = BRF_T[kind];
+  const f = Math.max(0, Math.min(1, value / t.scale_max));
+  const theta = Math.PI * (1 - f);
+  // Square viewBox; arc center (11,15), radius 8 — leaves 3px padding on each side.
+  const cx = 11, cy = 15, r = 8;
+  const nx = (cx + r * Math.cos(theta)).toFixed(2);
+  const ny = (cy - r * Math.sin(theta)).toFixed(2);
+  return `<svg class="gauge" viewBox="0 0 22 22" width="22" height="22" aria-hidden="true">`
+    + `<path d="M ${cx - r} ${cy} A ${r} ${r} 0 0 1 ${cx + r} ${cy}" fill="none" stroke="url(#g-${kind})" stroke-width="3" stroke-linecap="round"/>`
+    + `<line x1="${cx}" y1="${cy}" x2="${nx}" y2="${ny}" stroke="#444" stroke-width="1.4" stroke-linecap="round"/>`
+    + `<circle cx="${cx}" cy="${cy}" r="1.6" fill="#444"/>`
+    + `</svg>`;
+}
+
+function brfNum(value, kind, suffix, thresholdTip) {
+  if (value == null) return '';
+  return `${gaugeSvg(value, kind)} <b style="color:${brfNumColor(value, kind)}" title="${thresholdTip}">${value.toLocaleString('sv-SE')}</b>${suffix}`;
+}
+function aktaBadge(value) {
+  if (value === true)  return `<span style="color:${COLOR_GOOD}" title="Hemnet displays 'Äger marken' — confirmed äkta förening">äkta ✓</span>`;
+  if (value === false) return `<span style="color:${COLOR_BAD}">oäkta</span>`;
+  return `<span style="color:${COLOR_WARN}" title="Hemnet didn't display the äkta label — could be tomträtt, oäkta, or just missing">äkta?</span>`;
+}
+
+function brfStat(value, kind, label, unit, thresholdTip) {
+  if (value == null) return '';
+  return `<div class="brf-stat" title="${thresholdTip}">
+    ${gaugeSvg(value, kind)}
+    <div><span class="brf-val" style="color:${brfNumColor(value, kind)}">${value.toLocaleString('sv-SE')}</span>${unit ? ' ' + unit : ''}</div>
+    <span class="brf-cap">${label}</span>
+  </div>`;
+}
+
 function popupHtml(d) {
   const photo = (d.photos && d.photos[0])
     ? `<img class="popup-photo" src="${d.photos[0]}" loading="lazy" alt="">` : '';
   const vaning = d.vaning != null
     ? `${d.vaning}${d.vaning_total ? ' av ' + d.vaning_total : ''}${d.hiss ? ', hiss' : ''}`
     : '–';
-  const deal = d.deal_pct != null
-    ? `<div class="popup-deal" style="${dealStyle(d.deal_pct)}">
-         ${d.deal_pct > 0 ? '+' : ''}${d.deal_pct.toFixed(1)}% vs predicted ${fmtKr(d.predicted_price_kr)}
-       </div>` : '';
+  const dealBadge = d.deal_pct != null
+    ? `<span class="popup-deal" style="${dealStyle(d.deal_pct)}">${d.deal_pct > 0 ? '+' : ''}${d.deal_pct.toFixed(1)}%</span>`
+    : '';
+  const dealNote = d.deal_pct != null
+    ? `<div class="popup-meta" style="font-size:11px;color:#888;margin-top:2px">vs predicted ${fmtKr(d.predicted_price_kr)}</div>`
+    : '';
+  const brfStats = [
+    brfStat(d.brf_belaning_kr_m2, 'belaning', 'Belåning', 'kr/m²',
+            'Per-m² BRF debt. Stockholm p25=3 376 / p75=9 703. <3 400 healthy; >9 700 elevated fee-hike risk'),
+    brfStat(d.brf_arsavgift_kr_m2, 'arsavgift', 'Årsavgift', 'kr/m²',
+            'Annual BRF fee per m². Stockholm p25=711 / p75=930. <711 cheap; >930 premium'),
+    brfStat(d.brf_n_lgh, 'nlgh', 'Antal lgh', '',
+            'Föreningsstorlek — <65 noisy single-decision-maker risk; ≥233 large & stable'),
+  ].filter(Boolean).join('');
+  const brfSection = (d.forening || brfStats) ? `
+    <div class="popup-section">
+      ${d.forening ? `<div class="popup-brf-head"><b>BRF:</b> ${d.forening} · ${aktaBadge(d.brf_akta)}</div>` : ''}
+      ${brfStats ? `<div class="popup-brf-stats">${brfStats}</div>` : ''}
+    </div>` : '';
   return `
     ${photo}
-    <div class="popup-title">${d.address ?? ''}</div>
-    <div class="popup-area">${d.area ?? ''}</div>
-    <div class="popup-price">${fmtKr(d.asking_price_kr)}</div>
-    ${deal}
-    <div class="popup-meta">
-      <b>${fmtM2(d.m2)}</b> · ${d.rooms ?? '–'} rum · ${fmtKr(d.kr_per_m2)}/m²<br>
-      Byggår: <b>${d.byggar ?? '–'}</b> · Våning: <b>${vaning}</b><br>
-      ${d.forening ? `BRF: ${d.forening}<br>` : ''}
-      ${d.visning ? `Visning: ${d.visning}` : ''}
+    <div class="popup-section">
+      <div class="popup-title">${d.address ?? ''}</div>
+      <div class="popup-area">${d.area ?? ''}</div>
+      <div class="popup-price-row">
+        <span class="popup-price">${fmtKr(d.asking_price_kr)}</span>
+        ${dealBadge}
+      </div>
+      ${dealNote}
     </div>
-    <a class="popup-link" href="${d.href}" target="_blank" rel="noopener">Visa på Hemnet →</a>
+    <div class="popup-section">
+      <div class="popup-meta">
+        <b>${fmtM2(d.m2)}</b> · ${d.rooms ?? '–'} rum · ${fmtKr(d.kr_per_m2)}/m²<br>
+        Byggår: <b>${d.byggar ?? '–'}</b> · Våning: <b>${vaning}</b>
+      </div>
+    </div>
+    ${brfSection}
+    <div class="popup-footer">
+      <span>${d.visning ? 'Visning: ' + d.visning : ''}</span>
+      <a class="popup-link" href="${d.href}" target="_blank" rel="noopener">Hemnet →</a>
+    </div>
   `;
 }
 

@@ -109,14 +109,20 @@ L.tileLayer(
   { maxZoom: 19, attribution: '&copy; Esri, OpenStreetMap contributors' }
 ).addTo(map);
 
-// T-bana station overlay — small dots with name tooltips. Rendered before
-// listing markers so deal pins stay on top.
+// Transit overlay — T-bana stations (dark dots) + public ferry terminals
+// (blue dots). Both rendered before listing markers so deal pins stay on top.
 const TBANA = __TBANA__;
 TBANA.stations.forEach(s => {
   L.circleMarker([s.lat, s.lon], {
     radius: 3.5, color: '#fff', weight: 1.5,
     fillColor: '#222', fillOpacity: 1,
   }).bindTooltip(s.name, { direction: 'top', offset: [0, -4] }).addTo(map);
+});
+(TBANA.ferries || []).forEach(f => {
+  L.circleMarker([f.lat, f.lon], {
+    radius: 3.5, color: '#fff', weight: 1.5,
+    fillColor: '#7aa5cf', fillOpacity: 0.85,
+  }).bindTooltip(f.name, { direction: 'top', offset: [0, -4] }).addTo(map);
 });
 
 const fmtKr = n => n == null ? '–' : n.toLocaleString('sv-SE') + ' kr';

@@ -1,17 +1,24 @@
-"""One-shot fetcher: download Stockholm T-bana station coordinates from
-Overpass (OSM) and write a compact JSON to `tbana.json` for embedding in
-the map. Stations only — no track polylines (the OSM line modeling has
-doubled-track and shared-trunk topology that wasn't worth untangling for
-this use case).
+"""One-shot fetcher: download Stockholm public-transit reference points
+(T-bana stations + ferry terminals) from Overpass (OSM) and write a
+compact JSON to `tbana.json` for embedding in the map.
 
 Run when:
 - First time setup
-- A new station opens (rare)
+- New stations/terminals open (rare)
 
     python3 fetch_tbana.py
 
 Output: `tbana.json` with shape
-  {"stations": [{"name": "...", "lat": ..., "lon": ...}, ...]}
+  {
+    "stations": [{"name": "...", "lat": ..., "lon": ...}, ...],  # T-bana
+    "ferries":  [{"name": "...", "lat": ..., "lon": ...}, ...],  # public ferry
+  }
+
+Ferry filter: keep named `amenity=ferry_terminal` entries and skip
+tourist operators (Strömma Kanalbolaget, Viking Line, cruise lines) and
+the Trafikverket car-ferry network — only SL pendelbåtar and
+Waxholmsbolaget archipelago commute routes are useful for a property
+buyer judging transit access.
 """
 import json, urllib.parse, urllib.request, sys
 from pathlib import Path
@@ -38,18 +45,58 @@ def fetch_stations() -> list[dict]:
         f"out body;"
     )
     data = overpass(q)
-    out: list[dict] = []
-    seen_names: set[str] = set()
+    return _dedupe_named_nodes(data.get("elements", []))
+
+
+# Tourist/private ferry operators to skip — only commuter ferries qualify
+# as "public transit" for the property-buyer transit-proximity use case.
+_FERRY_SKIP_OPERATORS = {
+    "Strömma Kanalbolaget", "Viking Line", "Tallink Silja", "Birka Cruises",
+    "Trafikverket",  # vehicle ferries for road network, not passenger transit
+}
+# Some tourist stops carry the operator in the name instead of the
+# operator tag, so we also pattern-match the name field.
+_FERRY_SKIP_NAME_PATTERNS = (
+    "Viking Line", "Tallink", "Birka,", "Birka ", "Mälarlunch",
+    "Mälarparty", "Hop-on", "skoltrafik",
+)
+
+
+def fetch_ferries() -> list[dict]:
+    q = (
+        f"[out:json][timeout:60];"
+        f"("
+        f'node["amenity"="ferry_terminal"]({BBOX});'
+        f'node["public_transport"="stop_position"]["ferry"="yes"]({BBOX});'
+        f");"
+        f"out body;"
+    )
+    data = overpass(q)
+    keep: list[dict] = []
     for n in data.get("elements", []):
-        name = n.get("tags", {}).get("name")
-        if not name or name in seen_names:
+        tags = n.get("tags", {})
+        name = tags.get("name")
+        if not name:
             continue
-        seen_names.add(name)
-        out.append({
-            "name": name,
-            "lat": round(n["lat"], 5),
-            "lon": round(n["lon"], 5),
-        })
+        operator = tags.get("operator") or ""
+        if any(skip in operator for skip in _FERRY_SKIP_OPERATORS):
+            continue
+        if any(p in name for p in _FERRY_SKIP_NAME_PATTERNS):
+            continue
+        keep.append(n)
+    return _dedupe_named_nodes(keep)
+
+
+def _dedupe_named_nodes(nodes: list[dict]) -> list[dict]:
+    """Keep one entry per name, preserving first-seen lat/lon."""
+    out: list[dict] = []
+    seen: set[str] = set()
+    for n in nodes:
+        name = n.get("tags", {}).get("name")
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        out.append({"name": name, "lat": round(n["lat"], 5), "lon": round(n["lon"], 5)})
     return out
 
 
@@ -57,9 +104,12 @@ def main():
     print("Fetching T-bana stations from Overpass…", file=sys.stderr)
     stations = fetch_stations()
     print(f"  {len(stations)} stations", file=sys.stderr)
+    print("Fetching public ferry terminals from Overpass…", file=sys.stderr)
+    ferries = fetch_ferries()
+    print(f"  {len(ferries)} ferry terminals", file=sys.stderr)
 
     out_path = Path(__file__).parent / "tbana.json"
-    payload = {"stations": stations}
+    payload = {"stations": stations, "ferries": ferries}
     out_path.write_text(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
     size_kb = out_path.stat().st_size / 1024
     print(f"wrote {out_path}  ({size_kb:.1f} KB)", file=sys.stderr)

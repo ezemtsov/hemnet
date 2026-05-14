@@ -47,10 +47,18 @@ HTML_TEMPLATE = r"""<!doctype html>
   }
   #sidebar header h1 { font-size: 14px; margin: 0; font-weight: 600; }
   #sidebar header .sub { font-size: 11px; color: #888; margin-top: 2px; }
-  #sidebar header .legend { font-size: 11px; color: #555; margin-top: 8px; line-height: 1.6; }
-  .leg-swatch { display: inline-block; width: 10px; height: 10px; border-radius: 50%;
-                vertical-align: middle; margin-right: 4px;
-                border: 1.5px solid white; box-shadow: 0 0 0 1px rgba(0,0,0,0.25); }
+  #filters { display: flex; gap: 6px; margin-top: 8px; }
+  .filter-btn {
+    display: inline-flex; align-items: center; gap: 5px;
+    padding: 4px 8px; height: 26px; box-sizing: border-box;
+    border: 1px solid #d4d4d4; border-radius: 4px;
+    background: #fff; color: #555;
+    font-size: 11px; cursor: pointer;
+    transition: background .12s, color .12s, border-color .12s;
+  }
+  .filter-btn:hover { background: #f3f3f3; }
+  .filter-btn.active { background: #2a6df4; color: #fff; border-color: #2a6df4; }
+  .filter-btn .count { opacity: 0.7; }
   ul#list { list-style: none; padding: 0; margin: 0; }
   li.row { padding: 10px 14px; border-bottom: 1px solid #eee; cursor: pointer; transition: background .12s; }
   li.row:hover { background: #f0f4fa; }
@@ -80,13 +88,7 @@ HTML_TEMPLATE = r"""<!doctype html>
   <header>
     <h1 id="title">On-sale listings</h1>
     <div class="sub" id="sub"></div>
-    <div class="legend">
-      <div><span class="leg-swatch" style="background:#2da028"></span>≥+10% under model · likely deal</div>
-      <div><span class="leg-swatch" style="background:#e0b020"></span>within ±10% · noise band</div>
-      <div><span class="leg-swatch" style="background:#d33030"></span>≥10% over model · priced high</div>
-      <div><span class="leg-swatch" style="background:#999"></span>no prediction</div>
-      <div style="margin-top:4px;"><span style="color:#e0a012">★</span> high-liquidity stadsdel (strong resale)</div>
-    </div>
+    <div id="filters"></div>
   </header>
   <ul id="list"></ul>
 </aside>
@@ -254,23 +256,74 @@ for (let i = sorted.length - 1; i >= 0; i--) {
 const pinned = markers.filter(m => m).length;
 const subEl  = document.getElementById('sub');
 
-// Hide sidebar rows whose lat/lon falls outside the current map viewport.
-// Listings without coordinates have nothing to filter by — keep them shown.
-function updateListVisibility() {
+// Property-type filter groups — same 3-way split as the sidebar icons.
+const TYPE_GROUPS = [
+  { key: 'apt',   label: 'Lägenhet', icon: PROPERTY_ICON_SVG.building,
+    matches: ['Lägenhet'] },
+  { key: 'villa', label: 'Villa',    icon: PROPERTY_ICON_SVG.villa,
+    matches: ['Villa'] },
+  { key: 'row',   label: 'Radhus',   icon: PROPERTY_ICON_SVG.row,
+    matches: ['Radhus', 'Parhus', 'Kedjehus', 'Par-/kedje-/radhus'] },
+];
+const groupOf = new Map();   // bostadstyp -> group key
+TYPE_GROUPS.forEach(g => g.matches.forEach(t => groupOf.set(t, g.key)));
+// All groups active by default — clicking a button toggles its group off.
+const selectedGroups = new Set(TYPE_GROUPS.map(g => g.key));
+
+// Render filter buttons with per-group counts.
+const filtersEl = document.getElementById('filters');
+const groupCounts = {};
+sorted.forEach(d => {
+  const g = groupOf.get(d.bostadstyp);
+  if (g) groupCounts[g] = (groupCounts[g] || 0) + 1;
+});
+TYPE_GROUPS.forEach(g => {
+  if (!groupCounts[g.key]) return;
+  const btn = document.createElement('button');
+  btn.className = 'filter-btn active';
+  btn.title = `Toggle ${g.label}`;
+  btn.innerHTML = `${g.icon}<span class="count">${groupCounts[g.key]}</span>`;
+  btn.addEventListener('click', () => {
+    if (selectedGroups.has(g.key)) selectedGroups.delete(g.key);
+    else selectedGroups.add(g.key);
+    btn.classList.toggle('active');
+    updateVisibility();
+  });
+  filtersEl.appendChild(btn);
+});
+
+function passesTypeFilter(d) {
+  const g = groupOf.get(d.bostadstyp);
+  if (g) return selectedGroups.has(g);
+  // Unknown bostadstyp — show only when no filter is actively excluding (all on).
+  return selectedGroups.size === TYPE_GROUPS.length;
+}
+
+// Hide sidebar rows that fall outside the current map viewport or don't
+// match the selected property-type filters. Map markers reflect only the
+// type filter (panning shouldn't make pins disappear); sidebar reflects both.
+function updateVisibility() {
   const bounds = map.getBounds();
   let visible = 0;
   for (let i = 0; i < sorted.length; i++) {
-    const d = sorted[i], row = rows[i];
+    const d = sorted[i], row = rows[i], marker = markers[i];
+    const typeOk = passesTypeFilter(d);
+    if (marker) {
+      const onMap = map.hasLayer(marker);
+      if (typeOk && !onMap) marker.addTo(map);
+      else if (!typeOk && onMap) map.removeLayer(marker);
+    }
     if (!row) continue;
     const hasCoords = d.lat != null && d.lon != null;
-    const inView = !hasCoords || bounds.contains([d.lat, d.lon]);
-    row.style.display = inView ? '' : 'none';
-    if (inView) visible++;
+    const inBounds = !hasCoords || bounds.contains([d.lat, d.lon]);
+    const show = inBounds && typeOk;
+    row.style.display = show ? '' : 'none';
+    if (show) visible++;
   }
   subEl.textContent = `${visible} of ${sorted.length} in view · ${pinned} pinned · sorted by deal score`;
 }
-map.on('moveend', updateListVisibility);
-updateListVisibility();
+map.on('moveend', updateVisibility);
+updateVisibility();
 
 document.title = `Hemnet — ${sorted.length} onsale`;
 </script>

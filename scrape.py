@@ -232,12 +232,12 @@ def goto_and_wait(cdp: CDP, url: str, *, timeout_s: float = 16.0) -> int:
 
 
 def scrape(url: str, out_path: str, *, max_pages: int = 50, delay_s: float = 1.5):
-    # Match the tab by URL path family so we don't grab DevTools/about:blank tabs.
-    # /bostad covers both /bostader (search) and /bostad/<slug> (detail) — useful
-    # because the tab may have been navigated to a detail page during probing.
-    tab_substring = "/salda/" if "/salda/" in url else "/bostad"
+    # Find any Hemnet tab on the chosen Chromium — we'll navigate it to the
+    # target URL immediately anyway. Looser matcher accommodates the shared
+    # CDP-pool setup where a tab might be on /salda/, /bostad, or /kommande
+    # from a previous run.
     kind = kind_of(url)
-    cdp = CDP(find_tab(tab_substring))
+    cdp = CDP(find_tab("hemnet.se"))
     seen, total = set(), 0
     sep = "&" if "?" in url else "?"
     with open(out_path, "w") as f:

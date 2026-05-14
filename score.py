@@ -345,14 +345,17 @@ def evaluate_holdout(sold_features: list[dict], log_y: np.ndarray,
     }
 
 
-def train_region_model(sold_rows: list[dict], *, stadsdel_fn, fold_fine_to_coarse: bool):
-    """Train one region's apartments-only model. Returns a bundle with the fitted
-    beta plus everything needed at predict time (encoder, medians, kept levels)."""
+def train_region_model(sold_rows: list[dict], *, stadsdel_fn, fold_fine_to_coarse: bool,
+                       bostadstyp_filter: frozenset[str] = frozenset({"Lägenhet"})):
+    """Train one model on a subset of sold rows (filtered by bostadstyp).
+
+    Returns a bundle with the fitted beta plus everything needed at predict
+    time (encoder, medians, kept levels)."""
     pairs = []
     for r in sold_rows:
         if r.get("price_kr") is None or r["price_kr"] <= 0:
             continue
-        if r.get("bostadstyp") != "Lägenhet":
+        if r.get("bostadstyp") not in bostadstyp_filter:
             continue
         f = featurize(r, stadsdel_medians=None, stadsdel_fn=stadsdel_fn)
         if f is None:
@@ -410,26 +413,56 @@ def predict_one(model: dict, row: dict, resolved_stadsdel: str | None = None) ->
     return math.exp(pred_log)
 
 
+# Property-category buckets used for routing onsale predictions to the
+# right model. Apartments keep the inner/outer regional sub-split; villas
+# and the row-house family each get one flat model since they're
+# essentially outer-only in Stockholm kommun.
+APT_TYPES = frozenset({"Lägenhet"})
+VILLA_TYPES = frozenset({"Villa"})
+ROW_TYPES = frozenset({"Radhus", "Parhus", "Kedjehus", "Par-/kedje-/radhus"})
+
+
+def model_key_for(row: dict, region: str) -> str | None:
+    bt = row.get("bostadstyp")
+    if bt in APT_TYPES:
+        return f"apt_{region}"
+    if bt in VILLA_TYPES:
+        return "villa"
+    if bt in ROW_TYPES:
+        return "row"
+    return None
+
+
 def run(sold_path: str, onsale_path: str, out_path: str | None = None):
     sold_rows = [json.loads(l) for l in open(sold_path)]
     onsale_rows = [json.loads(l) for l in open(onsale_path)]
 
-    # --- split sold by region and train two apartment-only models ---------
+    # --- train one model per (category, region) bucket --------------------
+    # Apartments are split by region (inner/outer); villas and the row-house
+    # family each get one flat model — they're essentially outer-only in
+    # Stockholm and the n is too small to sub-split further.
     inner_sold = [r for r in sold_rows if region_of(r.get("area")) == "inner"]
     outer_sold = [r for r in sold_rows if region_of(r.get("area")) == "outer"]
+    models: dict[str, dict] = {
+        "apt_inner": train_region_model(inner_sold, stadsdel_fn=normalize_stadsdel,
+                                        fold_fine_to_coarse=False,
+                                        bostadstyp_filter=APT_TYPES),
+        "apt_outer": train_region_model(outer_sold, stadsdel_fn=stadsdel_fine,
+                                        fold_fine_to_coarse=True,
+                                        bostadstyp_filter=APT_TYPES),
+        "villa":     train_region_model(sold_rows, stadsdel_fn=stadsdel_fine,
+                                        fold_fine_to_coarse=True,
+                                        bostadstyp_filter=VILLA_TYPES),
+        "row":       train_region_model(sold_rows, stadsdel_fn=stadsdel_fine,
+                                        fold_fine_to_coarse=True,
+                                        bostadstyp_filter=ROW_TYPES),
+    }
 
-    inner_model = train_region_model(inner_sold,
-                                     stadsdel_fn=normalize_stadsdel,
-                                     fold_fine_to_coarse=False)
-    outer_model = train_region_model(outer_sold,
-                                     stadsdel_fn=stadsdel_fine,
-                                     fold_fine_to_coarse=True)
-
-    for label, m in (("inner", inner_model), ("outer", outer_model)):
+    for label, m in models.items():
         mt = m["metrics"]
-        print(f"{label.capitalize()} model: MAPE {mt['mape_pct']:.1f}%   "
-              f"median APE {mt['median_ape_pct']:.1f}%   p90 APE {mt['p90_ape_pct']:.1f}%   "
-              f"(n_train={mt['n_train']} n_test={mt['n_test']}, levels={len(m['levels'])})")
+        print(f"{label:10s}  MAPE {mt['mape_pct']:5.1f}%   "
+              f"median {mt['median_ape_pct']:5.1f}%   p90 {mt['p90_ape_pct']:5.1f}%   "
+              f"(n_train={mt['n_train']:4d} n_test={mt['n_test']:3d}, levels={len(m['levels']):2d})")
 
     # --- liquidity tiers from sold (used downstream by build_map.py) ------
     liquidity = compute_liquidity_tiers(sold_rows)
@@ -438,7 +471,7 @@ def run(sold_path: str, onsale_path: str, out_path: str | None = None):
     # (e.g. sold "Spånga - Tensta" → Spånga vs onsale "Tensta" → Tensta).
     resolver = build_latlon_stadsdel_resolver(sold_rows, k=5)
 
-    # --- score onsale by routing to the right region model ----------------
+    # --- score onsale by routing to the right (category, region) model ----
     scored = []
     for row in onsale_rows:
         resolved_sd = resolver(row.get("lat"), row.get("lon"))
@@ -446,7 +479,10 @@ def run(sold_path: str, onsale_path: str, out_path: str | None = None):
             region = "inner" if resolved_sd in INOM_TULLARNA else "outer"
         else:
             region = region_of(row.get("area"))
-        model = inner_model if region == "inner" else outer_model
+        key = model_key_for(row, region)
+        if key is None:
+            continue  # unknown bostadstyp — skip rather than mispredict
+        model = models[key]
         pred = predict_one(model, row, resolved_stadsdel=resolved_sd)
         if pred is None:
             continue
@@ -455,6 +491,7 @@ def run(sold_path: str, onsale_path: str, out_path: str | None = None):
         row["predicted_price_kr"] = int(round(pred))
         row["deal_pct"] = round(deal_pct, 1) if deal_pct is not None else None
         row["region"] = region
+        row["model_key"] = key
         row["model_mape_pct"] = round(model["metrics"]["mape_pct"], 1)
         row["stadsdel_resolved"] = resolved_sd
         own_s = normalize_stadsdel(row.get("area"))

@@ -16,21 +16,8 @@ import numpy as np
 import score
 
 
-HOUSE_TYPES = score._HOUSE_TYPES
 BASELINE_NUM = ["log_m2", "byggar_decade", "vaning_eff", "hiss_int", "log_avgift"]
 OWNERSHIP_NUM = BASELINE_NUM + ["is_house", "is_tomratt", "is_aganderatt", "is_andel"]
-
-# Coarse-stadsdel labels considered "inom tullarna" — matches Hemnet's
-# location_id 898741 filter once collapsed through normalize_stadsdel.
-INOM_TULLARNA = {
-    "Södermalm", "Kungsholmen", "Vasastan", "Östermalm", "Norrmalm",
-    "Gamla Stan", "Hagastaden", "Birkastan", "Gärdet", "Hjorthagen",
-    "Stadshagen", "Marieberg",
-}
-
-
-def region_of(area):
-    return "inner" if score.normalize_stadsdel(area) in INOM_TULLARNA else "outer"
 
 
 def featurize_set(sold_rows, *, stadsdel_fn, apartments_only):
@@ -48,17 +35,6 @@ def featurize_set(sold_rows, *, stadsdel_fn, apartments_only):
     return pairs
 
 
-def fold_to_parent_coarse(feats, area_by_idx, min_count=8):
-    """For fine encoder: fold buckets with <min_count rows to coarse parent."""
-    counts = {}
-    for f in feats:
-        counts[f["stadsdel"]] = counts.get(f["stadsdel"], 0) + 1
-    rare = {s for s, c in counts.items() if c < min_count}
-    for i, f in enumerate(feats):
-        if f["stadsdel"] in rare:
-            f["stadsdel"] = score.normalize_stadsdel(area_by_idx[i])
-
-
 def run_config(label, sold_rows, *, stadsdel_fn, apartments_only,
                numeric_features, fold_fine_to_coarse, seed=0):
     pairs = featurize_set(sold_rows, stadsdel_fn=stadsdel_fn, apartments_only=apartments_only)
@@ -66,9 +42,9 @@ def run_config(label, sold_rows, *, stadsdel_fn, apartments_only,
     areas = [r.get("area") for r, _ in pairs]
 
     if fold_fine_to_coarse:
-        fold_to_parent_coarse(feats, areas)
+        score.fold_fine_buckets(feats, areas)
 
-    keep = score.fold_rare_stadsdelar(feats, min_count=8)
+    keep = score.fold_rare_stadsdelar(feats)
     for f in feats:
         if f["stadsdel"] not in keep:
             f["stadsdel"] = "Other"
@@ -89,8 +65,8 @@ def run_config(label, sold_rows, *, stadsdel_fn, apartments_only,
 def run_split_config(label, sold_rows, *, stadsdel_fn, apartments_only,
                      numeric_features, fold_fine_to_coarse, seed=0):
     """Train inner/outer models separately; report per-region MAPE + weighted overall."""
-    inner = [r for r in sold_rows if region_of(r.get("area")) == "inner"]
-    outer = [r for r in sold_rows if region_of(r.get("area")) == "outer"]
+    inner = [r for r in sold_rows if score.region_of(r.get("area")) == "inner"]
+    outer = [r for r in sold_rows if score.region_of(r.get("area")) == "outer"]
     n_in = sum(1 for r in inner if r.get("price_kr") and r.get("price_kr") > 0
                and (not apartments_only or r.get("bostadstyp") == "Lägenhet"))
     n_out = sum(1 for r in outer if r.get("price_kr") and r.get("price_kr") > 0

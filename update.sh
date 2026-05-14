@@ -12,6 +12,8 @@
 # Parallel enrich: export PARALLEL=N (default 1) to shard the enrich step
 # across N Chromium instances on ports CDP_PORT..CDP_PORT+N-1 with profile
 # dirs USER_DATA-0..USER_DATA-(N-1). Each shard processes every N-th listing.
+# RAM cost ≈ 300 MB × N (a Chromium instance per shard) — keep N ≤ 4 on
+# 16 GB hosts; PARALLEL=10 needs ~3 GB free.
 
 set -euo pipefail
 cd "$(dirname "$0")"

@@ -15,16 +15,18 @@ import argparse, json, math, re, random
 from pathlib import Path
 import numpy as np
 
-# Features used in the regression. Names match the keys we read from each row.
+# Features used in production. is_house is omitted: train_region_model
+# filters to bostadstyp == "Lägenhet", so it would be a zero-variance column.
+# experiment.py adds it back when sweeping all-property configs.
 NUMERIC_FEATURES = ["log_m2", "byggar_decade", "vaning_eff", "hiss_int", "log_avgift",
-                    "is_house", "is_tomratt", "is_aganderatt", "is_andel"]
+                    "is_tomratt", "is_aganderatt", "is_andel"]
 
 # Directional words that aren't stadsdelar on their own — keep them with the next word
 # so "Lilla Essingen" stays distinct from a hypothetical "Lilla Anything else".
 _DIRECTIONAL = {"lilla", "stora", "västra", "östra", "norra", "norr", "södra", "söder",
                 "gamla", "centrala", "nedre", "övre"}
 
-_HOUSE_TYPES = {"Villa", "Radhus", "Parhus", "Kedjehus", "Par-/kedje-/radhus"}
+HOUSE_TYPES = {"Villa", "Radhus", "Parhus", "Kedjehus", "Par-/kedje-/radhus"}
 
 # Coarse-stadsdel labels considered "inom tullarna" (matches Hemnet's location_id
 # 898741 once collapsed through `normalize_stadsdel`). Listings here get the
@@ -139,7 +141,7 @@ def featurize(row: dict, stadsdel_medians: dict | None = None,
 
     bostadstyp = row.get("bostadstyp") or ""
     upplat = row.get("upplatelseform") or ""
-    is_house = 1 if bostadstyp in _HOUSE_TYPES else 0
+    is_house = 1 if bostadstyp in HOUSE_TYPES else 0
     is_tomratt = 1 if upplat == "Tomträtt" else 0
     is_aganderatt = 1 if upplat == "Äganderätt" else 0
     is_andel = 1 if upplat == "Andel i bostadsförening" else 0
@@ -152,17 +154,13 @@ def featurize(row: dict, stadsdel_medians: dict | None = None,
     # Houses on Äganderätt genuinely have no monthly fee — don't impute one.
     avgift_truly_none = (avgift is None and is_aganderatt)
 
-    if stadsdel_medians and not avgift_truly_none:
-        s = stadsdel_medians.get(stadsdel) or stadsdel_medians.get("__global__") or {}
-        byggar = byggar if byggar is not None else s.get("byggar")
-        vaning = vaning if vaning is not None else s.get("vaning")
-        avgift = avgift if avgift is not None else s.get("avgift")
-        hiss = hiss if hiss is not None else s.get("hiss", False)
-    elif stadsdel_medians:
+    if stadsdel_medians:
         s = stadsdel_medians.get(stadsdel) or stadsdel_medians.get("__global__") or {}
         byggar = byggar if byggar is not None else s.get("byggar")
         vaning = vaning if vaning is not None else s.get("vaning")
         hiss = hiss if hiss is not None else s.get("hiss", False)
+        if avgift is None and not avgift_truly_none:
+            avgift = s.get("avgift")
 
     return {
         "stadsdel": stadsdel,
@@ -192,6 +190,19 @@ def fold_rare_stadsdelar(rows_with_features: list[dict], min_count: int = 4) -> 
     for r in rows_with_features:
         counts[r["stadsdel"]] = counts.get(r["stadsdel"], 0) + 1
     return {s for s, c in counts.items() if c >= min_count}
+
+
+def fold_fine_buckets(feats: list[dict], areas: list[str | None], min_count: int = 8) -> None:
+    """In-place: fold fine-grain buckets with <min_count rows to their coarse
+    parent (via `normalize_stadsdel`). Used when training with `stadsdel_fine`
+    so very sparse sub-areas don't dominate the design matrix."""
+    counts: dict[str, int] = {}
+    for f in feats:
+        counts[f["stadsdel"]] = counts.get(f["stadsdel"], 0) + 1
+    rare = {s for s, c in counts.items() if c < min_count}
+    for i, f in enumerate(feats):
+        if f["stadsdel"] in rare:
+            f["stadsdel"] = normalize_stadsdel(areas[i])
 
 
 def compute_liquidity_tiers(sold_rows: list[dict]) -> dict[str, str]:
@@ -352,13 +363,7 @@ def train_region_model(sold_rows: list[dict], *, stadsdel_fn, fold_fine_to_coars
     areas = [r.get("area") for r, _ in pairs]
 
     if fold_fine_to_coarse:
-        counts: dict[str, int] = {}
-        for f in feats:
-            counts[f["stadsdel"]] = counts.get(f["stadsdel"], 0) + 1
-        rare = {s for s, c in counts.items() if c < 8}
-        for i, f in enumerate(feats):
-            if f["stadsdel"] in rare:
-                f["stadsdel"] = normalize_stadsdel(areas[i])
+        fold_fine_buckets(feats, areas)
 
     keep = fold_rare_stadsdelar(feats)
     for f in feats:

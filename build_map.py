@@ -115,7 +115,7 @@ const TBANA = __TBANA__;
 TBANA.stations.forEach(s => {
   L.circleMarker([s.lat, s.lon], {
     radius: 3.5, color: '#fff', weight: 1.5,
-    fillColor: '#222', fillOpacity: 1,
+    fillColor: '#666', fillOpacity: 0.85,
   }).bindTooltip(s.name, { direction: 'top', offset: [0, -4] }).addTo(map);
 });
 (TBANA.ferries || []).forEach(f => {

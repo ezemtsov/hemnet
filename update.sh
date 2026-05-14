@@ -9,11 +9,12 @@
 # The sold dataset is refreshed separately (monthly) via the longer pipeline
 # in README; this script picks the latest sold-*.enriched.jsonl in data/.
 #
-# Parallel enrich: export PARALLEL=N (default 1) to shard the enrich step
-# across N Chromium instances on ports CDP_PORT..CDP_PORT+N-1 with profile
-# dirs USER_DATA-0..USER_DATA-(N-1). Each shard processes every N-th listing.
-# RAM cost ≈ 300 MB × N (a Chromium instance per shard) — keep N ≤ 4 on
-# 16 GB hosts; PARALLEL=10 needs ~3 GB free.
+# Parallel enrich: export PARALLEL=N (default 1). Maps to a Python-internal
+# worker pool inside enrich.py (one process, N threads, each driving a
+# Chromium on a distinct port CDP_PORT..CDP_PORT+N-1 with profile dirs
+# USER_DATA[-i]). Workers pull from a shared queue → no shard pre-allocation,
+# slow rows don't block fast workers. RAM cost ≈ 300 MB × N (one Chromium
+# per worker) — keep N ≤ 4 on 16 GB hosts; PARALLEL=10 needs ~3 GB free.
 
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -68,53 +69,27 @@ HEMNET_CDP_PORT="${CDP_PORT}" python3 scrape.py --url "${ONSALE_URL}"
 ONSALE_JSONL="data/onsale-${DATE}.jsonl"
 ENRICHED_JSONL="data/onsale-${DATE}.enriched.jsonl"
 
+CDP_PORTS=$(seq -s, "${CDP_PORT}" $((CDP_PORT + PARALLEL - 1)))
+
 echo
-echo "▸ enrich"
-if [[ "${PARALLEL}" -eq 1 ]]; then
-  HEMNET_CDP_PORT="${CDP_PORT}" python3 enrich.py "${ONSALE_JSONL}"
-else
-  TMPDIR="$(mktemp -d)"
-  trap 'rm -rf "${TMPDIR}"' EXIT
-  # Round-robin shard the JSONL by line index so each shard sees the same
-  # rough distribution of cache-hits/misses (no shard hogs all the fresh URLs).
-  for i in $(seq 0 $((PARALLEL - 1))); do
-    awk -v shard="$i" -v n="${PARALLEL}" 'NR % n == shard' \
-      "${ONSALE_JSONL}" > "${TMPDIR}/shard-${i}.jsonl"
-    echo "  shard ${i}: $(wc -l < "${TMPDIR}/shard-${i}.jsonl") listings → :$((CDP_PORT + i))"
-  done
-  pids=()
-  for i in $(seq 0 $((PARALLEL - 1))); do
-    port=$((CDP_PORT + i))
-    HEMNET_CDP_PORT="${port}" python3 enrich.py \
-      "${TMPDIR}/shard-${i}.jsonl" --out "${TMPDIR}/shard-${i}.enriched.jsonl" \
-      2>&1 | sed "s/^/[shard ${i}] /" &
-    pids+=("$!")
-  done
-  fail=0
-  for pid in "${pids[@]}"; do wait "${pid}" || fail=1; done
-  if [[ "${fail}" -ne 0 ]]; then
-    echo "✗ at least one shard failed" >&2
-    exit 1
-  fi
-  cat "${TMPDIR}"/shard-*.enriched.jsonl > "${ENRICHED_JSONL}"
-  echo "  merged $(wc -l < "${ENRICHED_JSONL}") rows → ${ENRICHED_JSONL}"
-fi
+echo "▸ enrich  (pool=${PARALLEL} on ports ${CDP_PORTS})"
+HEMNET_CDP_PORTS="${CDP_PORTS}" python3 enrich.py "${ONSALE_JSONL}"
 
 echo
 echo "▸ geocode"
 python3 geocode.py "${ENRICHED_JSONL}"
 
-# Kommande pipeline — typically far fewer listings (~30-50), so always
-# sequential, single Chromium. Detail pages share the onsale cache namespace
-# (set in enrich.py CACHE_NAMESPACE) since their URL/structure is identical.
+# Kommande pipeline — smaller than onsale (~30-200 listings). Shares the
+# onsale cache namespace (set in enrich.py CACHE_NAMESPACE) since detail-page
+# URLs/structure are identical; reuses the same worker pool.
 KOMMANDE_JSONL="data/kommande-${DATE}.jsonl"
 KOMMANDE_ENRICHED="data/kommande-${DATE}.enriched.jsonl"
 echo
 echo "▸ scrape kommande"
 HEMNET_CDP_PORT="${CDP_PORT}" python3 scrape.py --url "${KOMMANDE_URL}"
 echo
-echo "▸ enrich kommande"
-HEMNET_CDP_PORT="${CDP_PORT}" python3 enrich.py "${KOMMANDE_JSONL}"
+echo "▸ enrich kommande  (pool=${PARALLEL})"
+HEMNET_CDP_PORTS="${CDP_PORTS}" python3 enrich.py "${KOMMANDE_JSONL}"
 echo
 echo "▸ geocode kommande"
 python3 geocode.py "${KOMMANDE_ENRICHED}"

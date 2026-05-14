@@ -252,7 +252,6 @@ def compute_medians(rows: list[dict]) -> dict:
             "avgift": float(np.median(d["avgift"])) if d["avgift"] else None,
             "hiss":   bool(np.mean(d["hiss"]) > 0.5),
         }
-    # global fallback across all rows
     flat = {"byggar": [], "vaning": [], "avgift": [], "hiss": []}
     for d in by_stadsdel.values():
         for k in flat: flat[k].extend(d[k])

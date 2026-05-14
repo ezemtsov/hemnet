@@ -18,11 +18,16 @@ map at **https://ezemtsov.github.io/hemnet/**. Pipeline + methodology in README.
 `update.sh` auto-starts Chromium on `:9223` if down. **The sold refresh is
 monthly and manual** — see README "Sold pipeline".
 
-`PARALLEL=N ./update.sh` shards the enrich step across N Chromium instances
-on ports `CDP_PORT..CDP_PORT+N-1` with profile dirs `USER_DATA[-i]`. Shard 0
-keeps the original `USER_DATA` profile so warm cookies are preserved when
-PARALLEL=1. Tested working up to PARALLEL=10. With kommun-wide ~600 daily
-listings, PARALLEL=2-3 cuts first-of-day runs from ~60 min to ~20 min.
+`PARALLEL=N ./update.sh` enriches via a Python-internal worker pool: one
+process, N threads, each holding its own CDP connection to a different
+Chromium (`CDP_PORT..CDP_PORT+N-1`). update.sh translates this to the
+`HEMNET_CDP_PORTS=9223,9224,...` env var the new enrich.py honors —
+no shell sharding / merge dance. Workers pull from a shared queue, so
+slow rows don't block fast workers (true work-stealing). Chromium
+profile dirs `USER_DATA[-i]` are persisted between runs; shard 0 keeps
+the original `USER_DATA` so warm cookies survive PARALLEL=1. Tested
+to PARALLEL=10. With kommun-wide ~600 daily listings, PARALLEL=4-10
+cuts first-of-day runs from ~60 min to ~6-15 min.
 
 ## Two Chromium instances (required)
 
@@ -43,8 +48,10 @@ default origin policy rejects CDP from `http://localhost:N` otherwise).
   and shouldn't end up in git history). Falls back to Nominatim if unset.
 - `HEMNET_USER_AGENT` — Nominatim asks for a real contact email when used as
   fallback. Set in shell rc; **never commit hardcoded value**.
-- `HEMNET_CDP_PORT` — which Chromium to drive (default 9222). `update.sh` sets
-  it per shard.
+- `HEMNET_CDP_PORT` — single Chromium port (default 9222). Used by scrape.py.
+- `HEMNET_CDP_PORTS` — comma-sep list of Chromium ports for the enrich
+  worker pool (e.g. `9223,9224,9225`). Overrides `HEMNET_CDP_PORT` in
+  `enrich.py`. update.sh sets this from `${CDP_PORT}..${CDP_PORT}+PARALLEL-1`.
 - `ONSALE_URL` — overrides the default onsale filter URL in `update.sh`.
 - `PARALLEL` — shard count for enrich (default 1). See main loop section.
 

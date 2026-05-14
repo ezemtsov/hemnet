@@ -19,7 +19,7 @@ treated as misses and re-fetched. Override with --cache-ttl-hours.
 each run) and the detail-page (potentially cached), the fresh list-page value
 wins if it's non-null. This matters most for `asking_price_kr` on on-sale.
 """
-import argparse, json, time, re, hashlib
+import argparse, json, os, queue, threading, time, re, hashlib
 from pathlib import Path
 from cdp import CDP, find_tab
 
@@ -257,10 +257,6 @@ def ready_js_for(kind: str) -> str:
     return "(document.body.innerText.match(/Boarea/g)||[]).length >= 1"
 
 
-def tab_substring_for(kind: str) -> str:
-    return "/salda/" if kind == "sold" else "/bostad"
-
-
 PHOTOS_JS = r"""
 (() => {
   const seen = new Set();
@@ -335,6 +331,34 @@ def cache_is_fresh(path: Path, ttl_hours: float | None) -> bool:
     return age_s < ttl_hours * 3600
 
 
+def _cdp_ports() -> list[int]:
+    """Read pool size from env. HEMNET_CDP_PORTS (comma-sep) takes precedence;
+    otherwise the single HEMNET_CDP_PORT (or its default 9222) is used."""
+    raw = os.environ.get("HEMNET_CDP_PORTS")
+    if raw:
+        return [int(p) for p in raw.split(",") if p.strip()]
+    return [int(os.environ.get("HEMNET_CDP_PORT", "9222"))]
+
+
+def _process_row(cdp: CDP, row: dict, cache_dir: Path, kind: str, ttl_h: float | None,
+                 delay_s: float) -> tuple[dict, str]:
+    """Cache-or-fetch one listing. Returns (merged_row, status) where status is
+    one of: hits / stale_refetched / fetched_new / failed."""
+    url = row["href"]
+    cache_path = cache_dir / f"{listing_id(url)}.json"
+    if cache_is_fresh(cache_path, ttl_h):
+        facts = json.loads(cache_path.read_text())
+        return merge_row_with_facts(row, facts), "hits"
+    had_cache = cache_path.exists()
+    facts = fetch_facts(cdp, url, kind)
+    if facts is None:
+        # URL- and description-based bostadstyp inference still runs via merge.
+        return merge_row_with_facts(row, {}), "failed"
+    cache_path.write_text(json.dumps(facts, ensure_ascii=False))
+    time.sleep(delay_s)
+    return merge_row_with_facts(row, facts), ("stale_refetched" if had_cache else "fetched_new")
+
+
 def enrich(in_path_str: str, out_path_str: str | None = None, *,
            delay_s: float = 1.5, cache_ttl_hours: float | None = None):
     in_path = Path(in_path_str)
@@ -351,41 +375,49 @@ def enrich(in_path_str: str, out_path_str: str | None = None, *,
     cache_dir.mkdir(parents=True, exist_ok=True)
 
     ttl_h = cache_ttl_hours if cache_ttl_hours is not None else DEFAULT_CACHE_TTL_H.get(kind)
+    ports = _cdp_ports()
+    n = len(rows)
 
-    cdp = None
-    written, hits, misses, failed, stale = 0, 0, 0, 0, 0
+    work_q: queue.Queue = queue.Queue()
+    results: list[dict | None] = [None] * n
+    counter = {"hits": 0, "stale_refetched": 0, "fetched_new": 0, "failed": 0, "done": 0}
+    lock = threading.Lock()
+
+    def worker(port: int):
+        cdp = CDP(find_tab("hemnet.se", f"http://localhost:{port}"))
+        while (item := work_q.get()) is not None:
+            idx, row = item
+            try:
+                merged, status = _process_row(cdp, row, cache_dir, kind, ttl_h, delay_s)
+            except Exception as e:
+                merged, status = merge_row_with_facts(row, {}), "failed"
+                with lock:
+                    print(f"[err] {row.get('href')!r}: {e}", flush=True)
+            with lock:
+                results[idx] = merged
+                counter[status] += 1
+                counter["done"] += 1
+                if counter["done"] % 50 == 0 or counter["done"] <= 3:
+                    print(f"[{counter['done']}/{n}] hits={counter['hits']} "
+                          f"stale_refetched={counter['stale_refetched']} "
+                          f"fetched_new={counter['fetched_new']} "
+                          f"failed={counter['failed']}", flush=True)
+
+    threads = [threading.Thread(target=worker, args=(p,), daemon=True) for p in ports]
+    for t in threads: t.start()
+    for i, row in enumerate(rows): work_q.put((i, row))
+    for _ in ports: work_q.put(None)  # one sentinel per worker
+    for t in threads: t.join()
 
     with open(out_path, "w") as f:
-        for i, row in enumerate(rows, 1):
-            url = row["href"]
-            cache_path = cache_dir / f"{listing_id(url)}.json"
-            if cache_is_fresh(cache_path, ttl_h):
-                facts = json.loads(cache_path.read_text())
-                hits += 1
-            else:
-                if cache_path.exists():
-                    stale += 1
-                if cdp is None:
-                    cdp = CDP(find_tab(tab_substring_for(kind)))
-                facts = fetch_facts(cdp, url, kind)
-                if facts is None:
-                    failed += 1
-                    print(f"[{i}/{len(rows)}] TIMEOUT {url}", flush=True)
-                    # Still apply the merge so bostadstyp inference from URL /
-                    # description runs even when the detail page failed to load.
-                    f.write(json.dumps(merge_row_with_facts(row, {}), ensure_ascii=False) + "\n")
-                    continue
-                cache_path.write_text(json.dumps(facts, ensure_ascii=False))
-                misses += 1
-                time.sleep(delay_s)
-            f.write(json.dumps(merge_row_with_facts(row, facts), ensure_ascii=False) + "\n")
-            f.flush()
-            written += 1
-            if i % 50 == 0 or i <= 3:
-                print(f"[{i}/{len(rows)}] hits={hits} stale_refetched={stale} fetched_new={misses-stale} failed={failed}", flush=True)
+        for r in results:
+            if r is not None:
+                f.write(json.dumps(r, ensure_ascii=False) + "\n")
+
     ttl_msg = f"TTL={ttl_h}h" if ttl_h is not None else "TTL=∞"
-    print(f"DONE [{kind} {ttl_msg}]. wrote {written} (hits {hits}, stale_refetched {stale}, "
-          f"fetched_new {misses-stale}, failed {failed}) -> {out_path}")
+    print(f"DONE [{kind} {ttl_msg}, pool={len(ports)}]. wrote {n} "
+          f"(hits {counter['hits']}, stale_refetched {counter['stale_refetched']}, "
+          f"fetched_new {counter['fetched_new']}, failed {counter['failed']}) -> {out_path}")
 
 
 def main():

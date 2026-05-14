@@ -51,23 +51,34 @@ def build_queries(address: str | None, area: str | None) -> list[str]:
     """Return queries to try in order — most specific first.
 
     Hemnet's neighborhood field often concatenates names ("Kungsholmen Fridhemsplan")
-    that confuse forward-geocoders, so we fall back to street + Stockholm if the
-    neighborhood-qualified query misses.
+    that confuse forward-geocoders, so we fall back to street + city if the
+    neighborhood-qualified query misses. The city is taken from the area
+    string when Hemnet tags a non-Stockholm kommun (`Sundbybergs kommun` →
+    Sundbyberg) — otherwise we default to Stockholm.
     """
     if not address:
         return []
     addr = clean_address(address)
     hood = None
+    city = "Stockholm"
     if area:
-        hood_part = area.split(",")[0].strip()
+        parts = [p.strip() for p in area.split(",")]
+        hood_part = parts[0] if parts else ""
         hood = re.split(r"[/\-–]", hood_part)[0].strip()
+        # Extract the kommun name from "<name>s? kommun". Trailing -s is the
+        # Swedish genitive ("Sundbybergs", "Stockholms") — strip it.
+        for p in parts[1:]:
+            m = re.match(r"([\wåäöÅÄÖ\-]+?)s?\s+kommun", p)
+            if m:
+                city = m.group(1)
+                break
     queries = []
     if hood:
-        queries.append(f"{addr}, {hood}, Stockholm")
-    queries.append(f"{addr}, Stockholm")
+        queries.append(f"{addr}, {hood}, {city}")
+    queries.append(f"{addr}, {city}")
     addr_no_letter = re.sub(r"(\b\d+)[A-Za-z]\b", r"\1", addr)
     if addr_no_letter != addr:
-        queries.append(f"{addr_no_letter}, Stockholm")
+        queries.append(f"{addr_no_letter}, {city}")
     return queries
 
 

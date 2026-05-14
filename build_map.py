@@ -72,9 +72,6 @@ HTML_TEMPLATE = r"""<!doctype html>
   .popup-meta b { color: #222; }
   .popup-link { display: inline-block; margin-top: 6px; font-size: 12px; }
   .popup-deal { display: inline-block; padding: 2px 8px; border-radius: 4px; font-weight: 600; font-size: 12px; margin-top: 4px; }
-  .deal-good { background: #d1f5d3; color: #1e6e26; }
-  .deal-mid  { background: #fff5cc; color: #8a6d00; }
-  .deal-bad  { background: #ffd6d6; color: #a02020; }
   .deal-na   { background: #eee;    color: #777; }
 </style>
 </head>
@@ -122,17 +119,22 @@ TBANA.stations.forEach(s => {
 const fmtKr = n => n == null ? '–' : n.toLocaleString('sv-SE') + ' kr';
 const fmtM2 = n => n == null ? '–' : Math.round(n) + ' m²';
 
+// Map deal_pct to a hue on the red→yellow→green sweep with tanh compression
+// so extreme values don't all collapse to the same colour. Anchored so 0%
+// lands at hue 50 (yellow); piecewise so the negative half (red → yellow)
+// covers 50 hue units and the positive half (yellow → green) covers 80.
+function dealHue(pct) {
+  const t = Math.tanh(pct / 30);
+  return t <= 0 ? (1 + t) * 50 : 50 + t * 80;
+}
 function dealColor(pct) {
   if (pct == null) return '#999';
-  if (pct >=  10) return '#2da028';   // green: ≥10% below model = good deal
-  if (pct <= -10) return '#d33030';   // red:   ≥10% above model = priced high
-  return '#e0b020';                    // yellow: within ±10%
+  return `hsl(${dealHue(pct)} 70% 42%)`;
 }
-function dealClass(pct) {
-  if (pct == null) return '';
-  if (pct >=  10) return 'deal-good';
-  if (pct <= -10) return 'deal-bad';
-  return 'deal-mid';
+function dealStyle(pct) {
+  if (pct == null) return 'background:#eee;color:#777';
+  const h = dealHue(pct);
+  return `background:hsl(${h} 75% 88%);color:hsl(${h} 70% 26%)`;
 }
 
 // Property-type icons. Three visual categories matching the model split:
@@ -159,7 +161,7 @@ function popupHtml(d) {
     ? `${d.vaning}${d.vaning_total ? ' av ' + d.vaning_total : ''}${d.hiss ? ', hiss' : ''}`
     : '–';
   const deal = d.deal_pct != null
-    ? `<div class="popup-deal ${dealClass(d.deal_pct)}">
+    ? `<div class="popup-deal" style="${dealStyle(d.deal_pct)}">
          ${d.deal_pct > 0 ? '+' : ''}${d.deal_pct.toFixed(1)}% vs predicted ${fmtKr(d.predicted_price_kr)}
        </div>` : '';
   return `
@@ -214,7 +216,7 @@ sorted.forEach((d, i) => {
   const li = document.createElement('li');
   li.className = 'row';
   const dealLabel = d.deal_pct != null
-    ? `<span class="deal ${dealClass(d.deal_pct)}" style="padding:2px 6px;border-radius:3px;">
+    ? `<span class="deal" style="${dealStyle(d.deal_pct)};padding:2px 6px;border-radius:3px;">
          ${d.deal_pct > 0 ? '+' : ''}${d.deal_pct.toFixed(1)}%
        </span>`
     : `<span class="deal deal-na" style="padding:2px 6px;border-radius:3px;">n/a</span>`;

@@ -6,6 +6,9 @@ data/
 __pycache__/
 *.pyc
 
+# Local secrets: see .env.example for the schema. Sourced by update.sh.
+.env
+
 # Editor / OS detritus
 .DS_Store
 *.swp

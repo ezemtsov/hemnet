@@ -19,6 +19,10 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
+# Auto-source .env (gitignored project-local secrets: MAPBOX_ACCESS_TOKEN,
+# RESROBOT_KEY, HEMNET_USER_AGENT). `set -a` exports every assignment.
+[[ -f .env ]] && { set -a; source .env; set +a; }
+
 ONSALE_URL="${ONSALE_URL:-https://www.hemnet.se/bostader?price_max=8000000&living_area_min=60&rooms_min=2.5&location_ids%5B%5D=18031}"
 KOMMANDE_URL="${KOMMANDE_URL:-https://www.hemnet.se/kommande/bostader?price_max=8000000&living_area_min=60&rooms_min=2.5&location_ids%5B%5D=18031}"
 CDP_PORT="${CDP_PORT:-9223}"

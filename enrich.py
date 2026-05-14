@@ -206,9 +206,11 @@ def ready_js_for(kind: str) -> str:
     if kind == "sold":
         return ("(document.body.innerText.match(/Boarea/g)||[]).length >= 1 && "
                 "(document.body.innerText.match(/Slutpris/g)||[]).length >= 2")
-    # On-sale: facts panel + the asking price block at the bottom
-    return ("(document.body.innerText.match(/Boarea/g)||[]).length >= 1 && "
-            "(document.body.innerText.match(/Avgift/g)||[]).length >= 1")
+    # On-sale / kommande: facts panel rendered when Boarea is in body text.
+    # We previously also required "Avgift", but house listings on
+    # Äganderätt have no monthly BR fee → that label never renders →
+    # fetch_facts hit its 21s timeout and produced empty facts (no photos).
+    return "(document.body.innerText.match(/Boarea/g)||[]).length >= 1"
 
 
 def tab_substring_for(kind: str) -> str:

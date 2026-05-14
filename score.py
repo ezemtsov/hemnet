@@ -16,46 +16,152 @@ from pathlib import Path
 import numpy as np
 
 # Features used in the regression. Names match the keys we read from each row.
-NUMERIC_FEATURES = ["log_m2", "byggar_decade", "vaning_eff", "hiss_int", "log_avgift"]
+NUMERIC_FEATURES = ["log_m2", "byggar_decade", "vaning_eff", "hiss_int", "log_avgift",
+                    "is_house", "is_tomratt", "is_aganderatt", "is_andel"]
+
+# Directional words that aren't stadsdelar on their own — keep them with the next word
+# so "Lilla Essingen" stays distinct from a hypothetical "Lilla Anything else".
+_DIRECTIONAL = {"lilla", "stora", "västra", "östra", "norra", "norr", "södra", "söder",
+                "gamla", "centrala", "nedre", "övre"}
+
+_HOUSE_TYPES = {"Villa", "Radhus", "Parhus", "Kedjehus", "Par-/kedje-/radhus"}
+
+# Coarse-stadsdel labels considered "inom tullarna" (matches Hemnet's location_id
+# 898741 once collapsed through `normalize_stadsdel`). Listings here get the
+# inner model; everything else gets the outer model. The split exists because
+# experiments showed inner ≈ 8% MAPE vs outer ≈ 16% — they're effectively two
+# different markets and a single hedonic fit compromises both.
+INOM_TULLARNA = {
+    # Coarse stadsdel parents
+    "Södermalm", "Kungsholmen", "Vasastan", "Östermalm", "Norrmalm",
+    "Gamla Stan", "Hagastaden", "Birkastan", "Gärdet", "Hjorthagen",
+    # Kungsholmen sub-areas (normalize_stadsdel produces these when the listing
+    # tags the sub-area rather than the parent).
+    "Stadshagen", "Marieberg", "Västra Kungsholmen", "Fredhäll", "Fridhemsplan",
+    "Hornsbergs", "Lindhagen", "Thorildsplan", "Norr Mälarstrand",
+    # Östermalm sub-areas
+    "Norra Djurgårdsstaden", "Nedre Gärdet",
+    # Södermalm sub-areas
+    "Sofia", "Hornstull", "Katarina", "Maria", "Skanstull", "Högalid", "Reimersholme",
+}
+
+
+def region_of(area: str | None) -> str:
+    return "inner" if normalize_stadsdel(area) in INOM_TULLARNA else "outer"
+
+
+# At Stockholm latitude (~59°N), 1° lat ≈ 111 km and 1° lon ≈ 55 km.
+# Scale lon so squared-Euclidean distance approximates real distance in km.
+_LAT_KM = 111.0
+_LON_KM_STHLM = 55.0
+
+
+def build_latlon_stadsdel_resolver(sold_rows: list[dict], k: int = 5):
+    """Return a function (lat, lon) -> stadsdel-bucket-name using k-NN majority
+    vote over geocoded sold rows. This fixes the train/predict label mismatch:
+    Hemnet tags the same geographic place differently in sold vs onsale strings
+    (e.g. sold "Spånga - Tensta" → Spånga, onsale "Tensta" → Tensta), so an
+    onsale row that lat/lon-lands among Spånga-labeled sold rows gets the
+    Spånga bucket — matching what the model was trained on."""
+    pts: list[tuple[float, float, str]] = []
+    for r in sold_rows:
+        lat, lon = r.get("lat"), r.get("lon")
+        if lat is None or lon is None:
+            continue
+        sd = normalize_stadsdel(r.get("area"))
+        if sd != "Unknown":
+            pts.append((float(lat), float(lon), sd))
+
+    def resolve(lat: float | None, lon: float | None) -> str | None:
+        if lat is None or lon is None or not pts:
+            return None
+        from collections import Counter
+        dists = [(((la - lat) * _LAT_KM) ** 2 + ((lo - lon) * _LON_KM_STHLM) ** 2, sd)
+                 for la, lo, sd in pts]
+        dists.sort(key=lambda t: t[0])
+        return Counter(sd for _, sd in dists[:k]).most_common(1)[0][0]
+
+    return resolve
 
 
 def normalize_stadsdel(area: str | None) -> str:
-    """Reduce Hemnet's messy `area` strings to a stable stadsdel bucket.
+    """Reduce Hemnet's messy `area` strings to a stable coarse stadsdel bucket.
 
     'Vasastan, Stockholms kommun'           -> 'Vasastan'
     'Vasastan/Norrmalm, Stockholms kommun'  -> 'Vasastan'
     'Östermalm - Gärdet, Stockholms kommun' -> 'Östermalm'
     'Södermalm Katarina, Stockholms kommun' -> 'Södermalm'
+    'Lilla Essingen, Stockholms kommun'     -> 'Lilla Essingen'  (directional prefix kept)
+    'HÄSSELBY, Stockholms kommun'           -> 'Hässelby'        (case-normalized)
     """
     if not area:
         return "Unknown"
-    head = area.split(",")[0].strip()
+    head = area.split(",")[0].split(".")[0].strip()
     head = re.split(r"[/\-–]", head)[0].strip()
-    head = head.split()[0] if head else "Unknown"
-    return head or "Unknown"
+    if not head:
+        return "Unknown"
+    words = head.split()
+    if not words:
+        return "Unknown"
+    if len(words) >= 2 and words[0].lower() in _DIRECTIONAL:
+        return f"{words[0].capitalize()} {words[1].capitalize()}"
+    return words[0].capitalize()
 
 
-def featurize(row: dict, stadsdel_medians: dict | None = None) -> dict | None:
+def stadsdel_fine(area: str | None) -> str:
+    """Fine-grain encoder: full area string (before comma), title-cased.
+
+    Use with `fold_rare_stadsdelar` to collapse low-count buckets back to the
+    coarse `normalize_stadsdel` parent. Intended for the granularity experiment.
+    """
+    if not area:
+        return "Unknown"
+    head = area.split(",")[0].split(".")[0].strip()
+    return " ".join(w.capitalize() for w in head.split()) if head else "Unknown"
+
+
+def featurize(row: dict, stadsdel_medians: dict | None = None,
+              stadsdel_fn=normalize_stadsdel,
+              resolved_stadsdel: str | None = None) -> dict | None:
     """Return a dict of features for one row, or None if essentials missing.
 
     `stadsdel_medians` (when provided) supplies fallback values for missing
     numeric features so on-sale listings with gaps still score.
+    `stadsdel_fn` is the encoder used to bucket `area` — defaults to coarse.
+    `resolved_stadsdel` (optional) overrides the area-based bucket — callers
+    use this at predict time to inject a lat/lon-based k-NN result so the
+    bucket matches sold-side labels even when Hemnet's area string differs.
     """
     m2 = row.get("boarea_m2") or row.get("m2")
     if not m2 or m2 <= 0:
         return None
-    stadsdel = normalize_stadsdel(row.get("area"))
+    stadsdel = resolved_stadsdel if resolved_stadsdel else stadsdel_fn(row.get("area"))
+
+    bostadstyp = row.get("bostadstyp") or ""
+    upplat = row.get("upplatelseform") or ""
+    is_house = 1 if bostadstyp in _HOUSE_TYPES else 0
+    is_tomratt = 1 if upplat == "Tomträtt" else 0
+    is_aganderatt = 1 if upplat == "Äganderätt" else 0
+    is_andel = 1 if upplat == "Andel i bostadsförening" else 0
 
     byggar = row.get("byggar")
     vaning = row.get("vaning")
     avgift = row.get("avgift_kr_mon") or row.get("fee_kr")
     hiss = row.get("hiss")
 
-    if stadsdel_medians:
+    # Houses on Äganderätt genuinely have no monthly fee — don't impute one.
+    avgift_truly_none = (avgift is None and is_aganderatt)
+
+    if stadsdel_medians and not avgift_truly_none:
         s = stadsdel_medians.get(stadsdel) or stadsdel_medians.get("__global__") or {}
         byggar = byggar if byggar is not None else s.get("byggar")
         vaning = vaning if vaning is not None else s.get("vaning")
         avgift = avgift if avgift is not None else s.get("avgift")
+        hiss = hiss if hiss is not None else s.get("hiss", False)
+    elif stadsdel_medians:
+        s = stadsdel_medians.get(stadsdel) or stadsdel_medians.get("__global__") or {}
+        byggar = byggar if byggar is not None else s.get("byggar")
+        vaning = vaning if vaning is not None else s.get("vaning")
         hiss = hiss if hiss is not None else s.get("hiss", False)
 
     return {
@@ -64,13 +170,23 @@ def featurize(row: dict, stadsdel_medians: dict | None = None) -> dict | None:
         "byggar_decade": (int(byggar) // 10 * 10) if byggar else None,
         "vaning_eff": int(vaning) if vaning is not None else None,
         "hiss_int": 1 if hiss else 0,
-        "log_avgift": math.log(float(avgift) + 1) if avgift else None,
+        "log_avgift": math.log(float(avgift) + 1) if avgift else (0.0 if avgift_truly_none else None),
+        "is_house": is_house,
+        "is_tomratt": is_tomratt,
+        "is_aganderatt": is_aganderatt,
+        "is_andel": is_andel,
     }
 
 
-def fold_rare_stadsdelar(rows_with_features: list[dict], min_count: int = 8) -> set[str]:
+def fold_rare_stadsdelar(rows_with_features: list[dict], min_count: int = 4) -> set[str]:
     """Return the set of stadsdel labels with at least `min_count` sold rows.
     Anything below that threshold becomes 'Other' (too sparse to fit reliably).
+
+    Threshold note: 4 is a compromise. Higher thresholds (8+) push small
+    suburb buckets into 'Other', which is then biased high because it
+    averages over heterogeneous folds; lower thresholds keep more buckets
+    but their coefficients are noisier. For this dataset 4 catches Vårberg/
+    Sätra/Fagersjö (5-6 rows each) at the cost of slightly higher variance.
     """
     counts: dict[str, int] = {}
     for r in rows_with_features:
@@ -138,15 +254,16 @@ def compute_medians(rows: list[dict]) -> dict:
     return out
 
 
-def build_design_matrix(feature_rows: list[dict], stadsdel_levels: list[str], medians: dict):
-    """Construct (X, valid_mask) where X is a numpy float matrix.
+def build_design_matrix(feature_rows: list[dict], stadsdel_levels: list[str], medians: dict,
+                        numeric_features: list[str] = NUMERIC_FEATURES):
+    """Construct X, a numpy float matrix.
 
-    Columns: [intercept, *NUMERIC_FEATURES, *stadsdel_dummies (drop reference)].
+    Columns: [intercept, *numeric_features, *stadsdel_dummies (drop reference)].
     Reference stadsdel = first level (alphabetical) → its coefficient is folded
     into the intercept. Missing numeric values are imputed from medians.
     """
     n = len(feature_rows)
-    n_num = len(NUMERIC_FEATURES)
+    n_num = len(numeric_features)
     n_dum = max(0, len(stadsdel_levels) - 1)
     X = np.zeros((n, 1 + n_num + n_dum))
     X[:, 0] = 1.0  # intercept
@@ -158,12 +275,22 @@ def build_design_matrix(feature_rows: list[dict], stadsdel_levels: list[str], me
         s = medians.get(r["stadsdel"]) or fallback
         bd = r["byggar_decade"] if r["byggar_decade"] is not None else (s.get("byggar") or fb_byggar)
         ve = r["vaning_eff"]    if r["vaning_eff"]    is not None else (s.get("vaning") or fb_vaning)
-        avg = math.exp(r["log_avgift"]) - 1 if r["log_avgift"] is not None else (s.get("avgift") or fb_avgift)
-        X[i, 1] = r["log_m2"]
-        X[i, 2] = bd
-        X[i, 3] = ve
-        X[i, 4] = r["hiss_int"]
-        X[i, 5] = math.log(avg + 1)
+        # Use the row's log_avgift as-is when present (including the legitimate 0.0
+        # for fee-less houses); only fall back to median when truly missing.
+        la = r["log_avgift"] if r["log_avgift"] is not None else math.log((s.get("avgift") or fb_avgift) + 1)
+        feat_vals = {
+            "log_m2": r["log_m2"],
+            "byggar_decade": bd,
+            "vaning_eff": ve,
+            "hiss_int": r["hiss_int"],
+            "log_avgift": la,
+            "is_house": r.get("is_house", 0),
+            "is_tomratt": r.get("is_tomratt", 0),
+            "is_aganderatt": r.get("is_aganderatt", 0),
+            "is_andel": r.get("is_andel", 0),
+        }
+        for k, name in enumerate(numeric_features, start=1):
+            X[i, k] = feat_vals.get(name, 0.0)
         # one-hot stadsdel (drop reference = stadsdel_levels[0])
         for j, level in enumerate(stadsdel_levels[1:], start=1 + n_num):
             if r["stadsdel"] == level:
@@ -173,17 +300,19 @@ def build_design_matrix(feature_rows: list[dict], stadsdel_levels: list[str], me
 
 
 def fit_and_predict(sold_features: list[dict], sold_log_y: np.ndarray,
-                    target_features: list[dict], stadsdel_levels: list[str], medians: dict
+                    target_features: list[dict], stadsdel_levels: list[str], medians: dict,
+                    numeric_features: list[str] = NUMERIC_FEATURES,
                     ) -> tuple[np.ndarray, np.ndarray]:
     """Solve OLS on sold, return (predicted_log_target, beta_coefficients)."""
-    X_train = build_design_matrix(sold_features, stadsdel_levels, medians)
-    X_pred  = build_design_matrix(target_features, stadsdel_levels, medians)
+    X_train = build_design_matrix(sold_features, stadsdel_levels, medians, numeric_features)
+    X_pred  = build_design_matrix(target_features, stadsdel_levels, medians, numeric_features)
     beta, *_ = np.linalg.lstsq(X_train, sold_log_y, rcond=None)
     return X_pred @ beta, beta
 
 
 def evaluate_holdout(sold_features: list[dict], log_y: np.ndarray,
-                     stadsdel_levels: list[str], medians: dict, *, seed: int = 0) -> dict:
+                     stadsdel_levels: list[str], medians: dict, *, seed: int = 0,
+                     numeric_features: list[str] = NUMERIC_FEATURES) -> dict:
     """80/20 holdout MAPE in linear price space."""
     n = len(sold_features)
     rng = random.Random(seed)
@@ -192,7 +321,8 @@ def evaluate_holdout(sold_features: list[dict], log_y: np.ndarray,
     train_idx, test_idx = idx[:cut], idx[cut:]
     train_feats = [sold_features[i] for i in train_idx]
     test_feats  = [sold_features[i] for i in test_idx]
-    pred_log, _ = fit_and_predict(train_feats, log_y[train_idx], test_feats, stadsdel_levels, medians)
+    pred_log, _ = fit_and_predict(train_feats, log_y[train_idx], test_feats,
+                                  stadsdel_levels, medians, numeric_features)
     pred_price = np.exp(pred_log)
     actual_price = np.exp(log_y[test_idx])
     pct_err = np.abs(pred_price - actual_price) / actual_price
@@ -204,71 +334,129 @@ def evaluate_holdout(sold_features: list[dict], log_y: np.ndarray,
     }
 
 
+def train_region_model(sold_rows: list[dict], *, stadsdel_fn, fold_fine_to_coarse: bool):
+    """Train one region's apartments-only model. Returns a bundle with the fitted
+    beta plus everything needed at predict time (encoder, medians, kept levels)."""
+    pairs = []
+    for r in sold_rows:
+        if r.get("price_kr") is None or r["price_kr"] <= 0:
+            continue
+        if r.get("bostadstyp") != "Lägenhet":
+            continue
+        f = featurize(r, stadsdel_medians=None, stadsdel_fn=stadsdel_fn)
+        if f is None:
+            continue
+        pairs.append((r, f))
+
+    feats = [f for _, f in pairs]
+    areas = [r.get("area") for r, _ in pairs]
+
+    if fold_fine_to_coarse:
+        counts: dict[str, int] = {}
+        for f in feats:
+            counts[f["stadsdel"]] = counts.get(f["stadsdel"], 0) + 1
+        rare = {s for s, c in counts.items() if c < 8}
+        for i, f in enumerate(feats):
+            if f["stadsdel"] in rare:
+                f["stadsdel"] = normalize_stadsdel(areas[i])
+
+    keep = fold_rare_stadsdelar(feats)
+    for f in feats:
+        if f["stadsdel"] not in keep:
+            f["stadsdel"] = "Other"
+
+    levels = sorted({f["stadsdel"] for f in feats})
+    medians = compute_medians(feats)
+    log_y = np.array([math.log(r["price_kr"]) for r, _ in pairs])
+
+    metrics = evaluate_holdout(feats, log_y, levels, medians)
+
+    X = build_design_matrix(feats, levels, medians, NUMERIC_FEATURES)
+    beta, *_ = np.linalg.lstsq(X, log_y, rcond=None)
+
+    return {
+        "stadsdel_fn": stadsdel_fn,
+        "fold_fine_to_coarse": fold_fine_to_coarse,
+        "levels": levels,
+        "keep": keep,
+        "medians": medians,
+        "beta": beta,
+        "metrics": metrics,
+        "n_train": len(feats),
+    }
+
+
+def predict_one(model: dict, row: dict, resolved_stadsdel: str | None = None) -> float | None:
+    """Predict the slutpris for a single onsale row via the given region model."""
+    f = featurize(row, stadsdel_medians=model["medians"],
+                  stadsdel_fn=model["stadsdel_fn"],
+                  resolved_stadsdel=resolved_stadsdel)
+    if f is None:
+        return None
+    # Apply same bucket-folding the trainer used: rare → coarse parent → Other.
+    if f["stadsdel"] not in model["keep"]:
+        if model["fold_fine_to_coarse"]:
+            coarse = normalize_stadsdel(row.get("area"))
+            f["stadsdel"] = coarse if coarse in model["keep"] else "Other"
+        else:
+            f["stadsdel"] = "Other"
+    X = build_design_matrix([f], model["levels"], model["medians"], NUMERIC_FEATURES)
+    pred_log = float((X @ model["beta"])[0])
+    return math.exp(pred_log)
+
+
 def run(sold_path: str, onsale_path: str, out_path: str | None = None):
     sold_rows = [json.loads(l) for l in open(sold_path)]
     onsale_rows = [json.loads(l) for l in open(onsale_path)]
 
-    # --- featurize sold (training set) -------------------------------------
-    sold_feat_pairs = []  # (row, features) pairs
-    for r in sold_rows:
-        if r.get("price_kr") is None or r["price_kr"] <= 0:
-            continue
-        f = featurize(r, stadsdel_medians=None)
-        if f is None:
-            continue
-        sold_feat_pairs.append((r, f))
+    # --- split sold by region and train two apartment-only models ---------
+    inner_sold = [r for r in sold_rows if region_of(r.get("area")) == "inner"]
+    outer_sold = [r for r in sold_rows if region_of(r.get("area")) == "outer"]
 
-    # Per-stadsdel medians for imputation (fit on sold only)
-    medians = compute_medians([f for _, f in sold_feat_pairs])
+    inner_model = train_region_model(inner_sold,
+                                     stadsdel_fn=normalize_stadsdel,
+                                     fold_fine_to_coarse=False)
+    outer_model = train_region_model(outer_sold,
+                                     stadsdel_fn=stadsdel_fine,
+                                     fold_fine_to_coarse=True)
 
-    # Fold rare stadsdelar
-    keep = fold_rare_stadsdelar([f for _, f in sold_feat_pairs])
-    for _, f in sold_feat_pairs:
-        if f["stadsdel"] not in keep:
-            f["stadsdel"] = "Other"
-    stadsdel_levels = sorted({f["stadsdel"] for _, f in sold_feat_pairs})
-
-    sold_features = [f for _, f in sold_feat_pairs]
-    log_y = np.array([math.log(r["price_kr"]) for r, _ in sold_feat_pairs])
-
-    # --- holdout evaluation -----------------------------------------------
-    metrics = evaluate_holdout(sold_features, log_y, stadsdel_levels, medians)
-    print(f"Holdout MAPE: {metrics['mape_pct']:.1f}%   median APE: {metrics['median_ape_pct']:.1f}%   p90 APE: {metrics['p90_ape_pct']:.1f}%   "
-          f"(n_train={metrics['n_train']} n_test={metrics['n_test']})")
-
-    # --- featurize on-sale (prediction set) -------------------------------
-    onsale_feat_pairs = []
-    for r in onsale_rows:
-        f = featurize(r, stadsdel_medians=medians)
-        if f is None:
-            continue
-        if f["stadsdel"] not in keep:
-            f["stadsdel"] = "Other"
-        onsale_feat_pairs.append((r, f))
-    onsale_features = [f for _, f in onsale_feat_pairs]
-
-    # --- fit on full sold, predict on-sale --------------------------------
-    pred_log, beta = fit_and_predict(sold_features, log_y, onsale_features, stadsdel_levels, medians)
-    predicted_price = np.exp(pred_log)
+    for label, m in (("inner", inner_model), ("outer", outer_model)):
+        mt = m["metrics"]
+        print(f"{label.capitalize()} model: MAPE {mt['mape_pct']:.1f}%   "
+              f"median APE {mt['median_ape_pct']:.1f}%   p90 APE {mt['p90_ape_pct']:.1f}%   "
+              f"(n_train={mt['n_train']} n_test={mt['n_test']}, levels={len(m['levels'])})")
 
     # --- liquidity tiers from sold (used downstream by build_map.py) ------
     liquidity = compute_liquidity_tiers(sold_rows)
 
-    # --- write scored output ----------------------------------------------
-    out_path_p = Path(out_path) if out_path else Path(onsale_path).with_suffix(".scored.jsonl")
+    # --- lat/lon k-NN resolver: fixes Hemnet's train/predict label mismatch
+    # (e.g. sold "Spånga - Tensta" → Spånga vs onsale "Tensta" → Tensta).
+    resolver = build_latlon_stadsdel_resolver(sold_rows, k=5)
+
+    # --- score onsale by routing to the right region model ----------------
     scored = []
-    for (row, f), p in zip(onsale_feat_pairs, predicted_price):
+    for row in onsale_rows:
+        resolved_sd = resolver(row.get("lat"), row.get("lon"))
+        if resolved_sd is not None:
+            region = "inner" if resolved_sd in INOM_TULLARNA else "outer"
+        else:
+            region = region_of(row.get("area"))
+        model = inner_model if region == "inner" else outer_model
+        pred = predict_one(model, row, resolved_stadsdel=resolved_sd)
+        if pred is None:
+            continue
         asking = row.get("asking_price_kr")
-        deal_pct = (p - asking) / asking * 100 if asking else None
-        row["predicted_price_kr"] = int(round(float(p)))
-        row["deal_pct"] = round(float(deal_pct), 1) if deal_pct is not None else None
-        # tier is for the on-sale listing's own stadsdel; use the pre-fold
-        # normalized name so sub-areas map back to their parent tier when
-        # the parent itself is high-liquidity.
+        deal_pct = (pred - asking) / asking * 100 if asking else None
+        row["predicted_price_kr"] = int(round(pred))
+        row["deal_pct"] = round(deal_pct, 1) if deal_pct is not None else None
+        row["region"] = region
+        row["model_mape_pct"] = round(model["metrics"]["mape_pct"], 1)
+        row["stadsdel_resolved"] = resolved_sd
         own_s = normalize_stadsdel(row.get("area"))
         row["stadsdel_liquidity"] = liquidity.get(own_s, "low")
         scored.append(row)
 
+    out_path_p = Path(out_path) if out_path else Path(onsale_path).with_suffix(".scored.jsonl")
     with open(out_path_p, "w") as f:
         for r in scored:
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
@@ -279,11 +467,13 @@ def run(sold_path: str, onsale_path: str, out_path: str | None = None):
     rated.sort(key=lambda r: r["deal_pct"], reverse=True)
     print("\nTop 10 candidate deals (highest predicted-vs-asking gap):")
     for r in rated[:10]:
-        print(f"  {r['deal_pct']:+5.1f}%  ask {r['asking_price_kr']:>9,}  pred {r['predicted_price_kr']:>9,}"
+        tag = "★" if r["region"] == "inner" else " "
+        print(f"  {tag} {r['deal_pct']:+5.1f}%  ask {r['asking_price_kr']:>9,}  pred {r['predicted_price_kr']:>9,}"
               f"  {r['m2']:>4} m²  {r['address']}, {r['area']}")
     print("\nBottom 5 (priced above model — likely premium / well-renovated / something the model misses):")
     for r in rated[-5:]:
-        print(f"  {r['deal_pct']:+5.1f}%  ask {r['asking_price_kr']:>9,}  pred {r['predicted_price_kr']:>9,}"
+        tag = "★" if r["region"] == "inner" else " "
+        print(f"  {tag} {r['deal_pct']:+5.1f}%  ask {r['asking_price_kr']:>9,}  pred {r['predicted_price_kr']:>9,}"
               f"  {r['m2']:>4} m²  {r['address']}, {r['area']}")
 
 

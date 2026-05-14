@@ -14,7 +14,8 @@ ROOT = Path(__file__).parent
 
 POPUP_FIELDS = (
     "href address area asking_price_kr m2 rooms kr_per_m2 byggar vaning vaning_total "
-    "hiss forening photos lat lon visning predicted_price_kr deal_pct stadsdel_liquidity"
+    "hiss forening photos lat lon visning predicted_price_kr deal_pct stadsdel_liquidity "
+    "bostadstyp"
 ).split()
 
 
@@ -60,6 +61,7 @@ HTML_TEMPLATE = r"""<!doctype html>
   li.row .addr { font-weight: 600; font-size: 13px; margin-top: 2px;
                  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   li.row .star { color: #e0a012; margin-right: 4px; cursor: help; }
+  li.row .ptype { color: #777; margin-right: 5px; vertical-align: -2px; cursor: help; }
   li.row .area { font-size: 11px; color: #888; }
   li.row .meta { font-size: 11px; color: #555; margin-top: 3px; }
   .popup-photo { width: 240px; height: 160px; object-fit: cover; border-radius: 4px; display: block; }
@@ -133,6 +135,23 @@ function dealClass(pct) {
   return 'deal-mid';
 }
 
+// Property-type icons. Three visual categories matching the model split:
+// Lägenhet (apartment building), Villa (single house), everything else
+// shares one "row of houses" glyph (Radhus, Parhus, Kedjehus, Par-/kedje-).
+const PROPERTY_ICON_SVG = {
+  building: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 14 14" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"><rect x="2.5" y="1.5" width="9" height="11"/><line x1="2.5" y1="5" x2="11.5" y2="5"/><line x1="2.5" y1="8.5" x2="11.5" y2="8.5"/><line x1="7" y1="1.5" x2="7" y2="12.5"/></svg>',
+  villa:    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 14 14" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"><path d="M1.5 7 L7 1.5 L12.5 7 L12.5 12.5 L1.5 12.5 Z"/></svg>',
+  row:      '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 14 14" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"><path d="M1 8 L4 4 L7 8 L10 4 L13 8 L13 12.5 L1 12.5 Z"/></svg>',
+};
+const BOSTADSTYP_ICON = {
+  'Lägenhet':           PROPERTY_ICON_SVG.building,
+  'Villa':              PROPERTY_ICON_SVG.villa,
+  'Radhus':             PROPERTY_ICON_SVG.row,
+  'Parhus':             PROPERTY_ICON_SVG.row,
+  'Kedjehus':           PROPERTY_ICON_SVG.row,
+  'Par-/kedje-/radhus': PROPERTY_ICON_SVG.row,
+};
+
 function popupHtml(d) {
   const photo = (d.photos && d.photos[0])
     ? `<img class="popup-photo" src="${d.photos[0]}" loading="lazy" alt="">` : '';
@@ -203,9 +222,12 @@ sorted.forEach((d, i) => {
     ? `vån ${d.vaning}${d.vaning_total ? '/' + d.vaning_total : ''}${d.hiss ? ' (hiss)' : ''}` : '';
   const star = d.stadsdel_liquidity === 'high'
     ? `<span class="star" title="High-liquidity stadsdel — strong resale">★</span>` : '';
+  const ptypeSvg = BOSTADSTYP_ICON[d.bostadstyp];
+  const ptypeIcon = ptypeSvg
+    ? `<span class="ptype" title="${d.bostadstyp}">${ptypeSvg}</span>` : '';
   li.innerHTML = `
     <div class="top">${dealLabel}<span class="price">${fmtKr(d.asking_price_kr)}</span></div>
-    <div class="addr">${star}${d.address ?? ''}</div>
+    <div class="addr">${ptypeIcon}${star}${d.address ?? ''}</div>
     <div class="area">${d.area ?? ''}</div>
     <div class="meta">${fmtM2(d.m2)} · ${d.rooms ?? '–'} rum · ${fmtKr(d.kr_per_m2)}/m² ${vaning ? '· ' + vaning : ''}</div>
   `;

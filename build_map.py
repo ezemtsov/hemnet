@@ -15,7 +15,7 @@ ROOT = Path(__file__).parent
 POPUP_FIELDS = (
     "href address area asking_price_kr m2 rooms kr_per_m2 byggar vaning vaning_total "
     "hiss forening photos lat lon visning predicted_price_kr deal_pct stadsdel_liquidity "
-    "bostadstyp status "
+    "bostadstyp status min_to_odenplan "
     "brf_akta brf_n_lgh brf_arsavgift_kr_m2 brf_belaning_kr_m2"
 ).split()
 
@@ -263,6 +263,14 @@ function brfNum(value, kind, suffix, thresholdTip) {
   if (value == null) return '';
   return `${gaugeSvg(value, kind)} <b style="color:${brfNumColor(value, kind)}" title="${thresholdTip}">${value.toLocaleString('sv-SE')}</b>${suffix}`;
 }
+// Commute-time color: <20 great (green), 20-45 normal, >45 red.
+function commuteColor(mins) {
+  if (mins == null) return COLOR_NEUTRAL;
+  if (mins <  20) return COLOR_GOOD;
+  if (mins >  45) return COLOR_BAD;
+  return COLOR_NEUTRAL;
+}
+
 function aktaBadge(value) {
   if (value === true)  return `<span style="color:${COLOR_GOOD}" title="Hemnet displays 'Äger marken' — confirmed äkta förening">äkta ✓</span>`;
   if (value === false) return `<span style="color:${COLOR_BAD}">oäkta</span>`;
@@ -317,7 +325,9 @@ function popupHtml(d) {
     <div class="popup-section">
       <div class="popup-meta">
         <b>${fmtM2(d.m2)}</b> · ${d.rooms ?? '–'} rum · ${fmtKr(d.kr_per_m2)}/m²<br>
-        Byggår: <b>${d.byggar ?? '–'}</b> · Våning: <b>${vaning}</b>
+        Byggår: <b>${d.byggar ?? '–'}</b> · Våning: <b>${vaning}</b>${
+          d.min_to_odenplan != null ? `<br>Pendling till Odenplan: <b style="color:${commuteColor(d.min_to_odenplan)}">${d.min_to_odenplan} min</b>` : ''
+        }
       </div>
     </div>
     ${brfSection}
@@ -379,7 +389,9 @@ sorted.forEach((d, i) => {
     <div class="top">${dealLabel}<span class="price">${fmtKr(d.asking_price_kr)}</span></div>
     <div class="addr">${ptypeIcon}${star}${d.address ?? ''}</div>
     <div class="area">${d.area ?? ''}</div>
-    <div class="meta">${fmtM2(d.m2)} · ${d.rooms ?? '–'} rum · ${fmtKr(d.kr_per_m2)}/m² ${vaning ? '· ' + vaning : ''}</div>
+    <div class="meta">${fmtM2(d.m2)} · ${d.rooms ?? '–'} rum · ${fmtKr(d.kr_per_m2)}/m² ${vaning ? '· ' + vaning : ''}${
+      d.min_to_odenplan != null ? ` · <span style="color:${commuteColor(d.min_to_odenplan)}">${d.min_to_odenplan} min</span>` : ''
+    }</div>
   `;
   li.addEventListener('click', () => selectIndex(i));
   listEl.appendChild(li);

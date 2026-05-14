@@ -101,6 +101,10 @@ cat "data/onsale-${DATE}.enriched.geo.jsonl" \
 echo
 echo "▸ merged onsale + kommande → ${LIVE_GEO} ($(wc -l < "${LIVE_GEO}") rows)"
 
+echo
+echo "▸ route (transit minutes to Odenplan via Trafiklab/ResRobot)"
+python3 route.py "${LIVE_GEO}"
+
 # Pick the most recent sold snapshot for scoring. Prefer the geocoded
 # (.enriched.geo.jsonl) variant since score.py uses the lat/lon k-NN
 # resolver at predict time.

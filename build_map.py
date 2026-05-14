@@ -50,10 +50,10 @@ HTML_TEMPLATE = r"""<!doctype html>
       transform: translateX(-100%);
       transition: transform 0.2s ease;
     }
-    body.show-sidebar #sidebar { transform: translateX(0); }
+    body.show-sidebar #sidebar { transform: translateX(0); z-index: 1010; }
     #mobile-toggle {
       display: block;
-      position: fixed; top: 10px; right: 10px; z-index: 20;
+      position: fixed; top: 10px; right: 10px; z-index: 1020;
       background: #fff; border: 1px solid #ccc; border-radius: 4px;
       padding: 7px 11px; font: 600 13px -apple-system, system-ui, sans-serif;
       box-shadow: 0 2px 6px rgba(0,0,0,0.15);

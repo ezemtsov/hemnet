@@ -37,15 +37,26 @@ echo
 
 # Launch (or reuse) one Chromium per shard. Shard 0 uses the original
 # $USER_DATA path so existing warm cookies/session keep working in the
-# PARALLEL=1 case; shards 1..N-1 use suffixed profile dirs.
+# PARALLEL=1 case; shards 1..N-1 use suffixed profile dirs. Chromiums
+# we start ourselves run headless and get cleaned up on EXIT; any tab
+# that was already up before we ran is left alone.
+SPAWNED_CHROMIUM_PIDS=()
+cleanup_chromium() {
+  for pid in "${SPAWNED_CHROMIUM_PIDS[@]}"; do
+    kill "$pid" 2>/dev/null || true
+  done
+}
+trap cleanup_chromium EXIT
+
 ensure_chromium() {
   local port="$1" user_data="$2"
   if curl -s --max-time 2 "http://localhost:${port}/json/version" >/dev/null 2>&1; then
-    return 0
+    return 0  # already up — leave alone, don't track for cleanup
   fi
   echo "▸ starting Chromium on :${port}  (profile $(basename "${user_data}"))"
-  chromium --remote-debugging-port="${port}" --remote-allow-origins='*' \
+  chromium --headless=new --remote-debugging-port="${port}" --remote-allow-origins='*' \
            --user-data-dir="${user_data}" "${ONSALE_URL}" >/dev/null 2>&1 &
+  SPAWNED_CHROMIUM_PIDS+=("$!")
   for j in $(seq 1 30); do
     sleep 0.5
     if curl -s --max-time 1 "http://localhost:${port}/json/version" >/dev/null 2>&1; then

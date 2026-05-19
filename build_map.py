@@ -17,7 +17,7 @@ ROOT = Path(__file__).parent
 POPUP_FIELDS = (
     "href address area asking_price_kr m2 rooms kr_per_m2 byggar vaning vaning_total "
     "hiss forening photos lat lon visning predicted_price_kr deal_pct stadsdel_liquidity "
-    "bostadstyp status min_to_odenplan "
+    "bostadstyp status min_to_odenplan published_at "
     "brf_akta brf_n_lgh brf_arsavgift_kr_m2 brf_belaning_kr_m2 "
     "sold_price_kr sold_date sold_url realized_deal_pct first_seen last_seen "
     "asking_history"
@@ -87,6 +87,7 @@ def _ghost_from_history(rec: dict) -> dict | None:
         "first_seen":         rec.get("first_seen"),
         "last_seen":          rec.get("last_seen"),
         "asking_history":     rec.get("asking_history"),
+        "published_at":       rec.get("published_at"),
         "min_to_odenplan":    rec.get("min_to_odenplan"),
         "brf_akta":           rec.get("brf_akta"),
         "brf_n_lgh":          rec.get("brf_n_lgh"),
@@ -358,6 +359,29 @@ function commuteColor(mins) {
   return COLOR_NEUTRAL;
 }
 
+// Listing freshness: days if < 7, otherwise whole weeks. Green when fresh
+// (≤ 1 week), amber when stale (> 4 weeks) — stale usually means seller
+// is having trouble moving it.
+function freshnessFromIso(iso) {
+  if (!iso) return null;
+  const ms = Date.now() - new Date(iso + 'T00:00:00').getTime();
+  return Math.max(0, Math.floor(ms / 86400000));
+}
+function freshnessLabel(iso) {
+  const d = freshnessFromIso(iso);
+  if (d == null) return '';
+  if (d < 7)  return `${d} ${d === 1 ? 'dag' : 'dagar'}`;
+  const w = Math.floor(d / 7);
+  return `${w} ${w === 1 ? 'vecka' : 'veckor'}`;
+}
+function freshnessColor(iso) {
+  const d = freshnessFromIso(iso);
+  if (d == null) return COLOR_NEUTRAL;
+  if (d <= 7)  return COLOR_GOOD;
+  if (d >  30) return COLOR_WARN;
+  return COLOR_NEUTRAL;
+}
+
 function aktaBadge(value) {
   if (value === true)  return `<span style="color:${COLOR_GOOD}" title="Hemnet displays 'Äger marken' — confirmed äkta förening">äkta ✓</span>`;
   if (value === false) return `<span style="color:${COLOR_BAD}">oäkta</span>`;
@@ -432,6 +456,9 @@ function popupHtml(d) {
         <b>${fmtM2(d.m2)}</b> · ${d.rooms ?? '–'} rum · ${fmtKr(d.kr_per_m2)}/m²<br>
         Byggår: <b>${d.byggar ?? '–'}</b> · Våning: <b>${vaning}</b>${
           d.min_to_odenplan != null ? `<br>Pendling till Odenplan: <b style="color:${commuteColor(d.min_to_odenplan)}">${d.min_to_odenplan} min</b>` : ''
+        }${
+          d.published_at && !isSold && !isWithdrawn
+            ? `<br>Tid på marknaden: <b style="color:${freshnessColor(d.published_at)}">${freshnessLabel(d.published_at)}</b>` : ''
         }
       </div>
     </div>
@@ -513,6 +540,10 @@ sorted.forEach((d, i) => {
     <div class="area">${d.area ?? ''}</div>
     <div class="meta">${fmtM2(d.m2)} · ${d.rooms ?? '–'} rum · ${fmtKr(d.kr_per_m2)}/m² ${vaning ? '· ' + vaning : ''}${
       d.min_to_odenplan != null ? ` · <span style="color:${commuteColor(d.min_to_odenplan)}">${d.min_to_odenplan} min</span>` : ''
+    }${
+      d.published_at && !isSold && !isWithdrawn
+        ? ` · <span style="color:${freshnessColor(d.published_at)}" title="Tid på marknaden">${freshnessLabel(d.published_at)}</span>`
+        : ''
     }</div>
   `;
   li.addEventListener('click', () => selectIndex(i));

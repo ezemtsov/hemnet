@@ -287,6 +287,31 @@ def extract_photos(items: list[dict]) -> list[str]:
     return [it["src"] for it in sorted(items, key=order_key)]
 
 
+# JSON-LD parsing for the listing publication date. Hemnet emits a couple of
+# schema.org blocks per detail page; the Event block carries an Offer whose
+# `validFrom` is when the listing went live (independent of when our scraper
+# first saw it, so accurate even for listings older than the daily ledger).
+JSONLD_JS = ("[...document.querySelectorAll('script[type=\"application/ld+json\"]')]"
+             ".map(s=>s.textContent)")
+
+
+def extract_published_at(scripts: list[str]) -> str | None:
+    """Return an ISO date string (YYYY-MM-DD) from the first JSON-LD block
+    whose Offer has a validFrom, or None if not present."""
+    for raw in scripts or []:
+        try:
+            data = json.loads(raw)
+        except Exception:
+            continue
+        for obj in (data if isinstance(data, list) else [data]):
+            offer = (obj or {}).get("offers") if isinstance(obj, dict) else None
+            if isinstance(offer, dict):
+                vf = offer.get("validFrom")
+                if isinstance(vf, str) and len(vf) >= 10:
+                    return vf[:10]
+    return None
+
+
 def fetch_facts(cdp: CDP, url: str, kind: str, *, timeout_s: float = 21.0) -> dict | None:
     cdp.navigate(url)
     ready = ready_js_for(kind)
@@ -300,6 +325,7 @@ def fetch_facts(cdp: CDP, url: str, kind: str, *, timeout_s: float = 21.0) -> di
             facts = parse_facts(extract_facts(body, labels), kind)
             facts.update(parse_brf_facts(extract_brf_facts(body)))
             facts["photos"] = extract_photos(cdp.eval(PHOTOS_JS) or [])
+            facts["published_at"] = extract_published_at(cdp.eval(JSONLD_JS) or [])
             return facts
     return None
 

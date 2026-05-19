@@ -91,7 +91,7 @@ CDP_PORTS=$(seq -s, "${CDP_PORT}" $((CDP_PORT + PARALLEL - 1)))
 
 echo
 echo "▸ enrich  (pool=${PARALLEL} on ports ${CDP_PORTS})"
-HEMNET_CDP_PORTS="${CDP_PORTS}" python3 enrich.py "${ONSALE_JSONL}"
+HEMNET_CDP_PORTS="${CDP_PORTS}" python3 enrich.py "${ONSALE_JSONL}" ${CACHE_TTL_HOURS:+--cache-ttl-hours "${CACHE_TTL_HOURS}"}
 
 echo
 echo "▸ geocode"
@@ -107,7 +107,7 @@ echo "▸ scrape kommande"
 HEMNET_CDP_PORT="${CDP_PORT}" python3 scrape.py --url "${KOMMANDE_URL}"
 echo
 echo "▸ enrich kommande  (pool=${PARALLEL})"
-HEMNET_CDP_PORTS="${CDP_PORTS}" python3 enrich.py "${KOMMANDE_JSONL}"
+HEMNET_CDP_PORTS="${CDP_PORTS}" python3 enrich.py "${KOMMANDE_JSONL}" ${CACHE_TTL_HOURS:+--cache-ttl-hours "${CACHE_TTL_HOURS}"}
 echo
 echo "▸ geocode kommande"
 python3 geocode.py "${KOMMANDE_ENRICHED}"

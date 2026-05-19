@@ -54,7 +54,10 @@ ensure_chromium() {
     return 0  # already up — leave alone, don't track for cleanup
   fi
   echo "▸ starting Chromium on :${port}  (profile $(basename "${user_data}"))"
-  chromium --headless=new --remote-debugging-port="${port}" --remote-allow-origins='*' \
+  # NOTE: headed mode is required — Hemnet sits behind Cloudflare bot
+  # detection, which serves a "Just a moment..." block page to
+  # --headless=new and the real listing markup never renders.
+  chromium --remote-debugging-port="${port}" --remote-allow-origins='*' \
            --user-data-dir="${user_data}" "${ONSALE_URL}" >/dev/null 2>&1 &
   SPAWNED_CHROMIUM_PIDS+=("$!")
   for j in $(seq 1 30); do
@@ -135,9 +138,18 @@ echo
 echo "▸ score (against $(basename "${SOLD}"))"
 python3 score.py --sold "${SOLD}" --onsale "${LIVE_GEO}"
 
+# Cross-day ledger (data/history.jsonl). Marks today's ids active and probes
+# the detail page of any id that vanished since yesterday to detect sold
+# (Slutpris / redirect to /salda/) or withdrawn. Stateful but reconstructible
+# from data/live-*.scored.jsonl via `python3 history.py rebuild`.
+LIVE_SCORED="data/live-${DATE}.enriched.geo.scored.jsonl"
+echo
+echo "▸ history (track outcomes across days)"
+HEMNET_CDP_PORT="${CDP_PORT}" python3 history.py update --live "${LIVE_SCORED}"
+
 echo
 echo "▸ build map"
-python3 build_map.py "data/live-${DATE}.enriched.geo.scored.jsonl"
+python3 build_map.py "${LIVE_SCORED}" --history data/history.jsonl
 
 echo
 echo "✓ done.  open  file://$(pwd)/index.html"

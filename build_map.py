@@ -2,7 +2,7 @@
 
 Usage:
     python3 build_map.py data/onsale-2026-05-10.enriched.geo.jsonl
-    open index.html
+    python3 build_map.py … --history data/history.jsonl    # adds sold/withdrawn ghosts
 
 Embeds the listing data inline so the file works with file:// (no server needed).
 Re-run after each on-sale refresh to regenerate.
@@ -10,22 +10,109 @@ Re-run after each on-sale refresh to regenerate.
 import argparse, json
 from pathlib import Path
 
+from enrich import listing_id
+
 ROOT = Path(__file__).parent
 
 POPUP_FIELDS = (
     "href address area asking_price_kr m2 rooms kr_per_m2 byggar vaning vaning_total "
     "hiss forening photos lat lon visning predicted_price_kr deal_pct stadsdel_liquidity "
     "bostadstyp status min_to_odenplan "
-    "brf_akta brf_n_lgh brf_arsavgift_kr_m2 brf_belaning_kr_m2"
+    "brf_akta brf_n_lgh brf_arsavgift_kr_m2 brf_belaning_kr_m2 "
+    "sold_price_kr sold_date sold_url realized_deal_pct first_seen last_seen "
+    "asking_history"
 ).split()
+
+ONSALE_CACHE = ROOT / "cache" / "details" / "onsale"
 
 
 def trim_row(r: dict) -> dict:
     out = {k: r.get(k) for k in POPUP_FIELDS if r.get(k) is not None}
     # Keep only the first 5 photos to keep the embedded payload reasonable.
-    if "photos" in out:
-        out["photos"] = out["photos"][:5]
+    if photos := out.get("photos"):
+        out["photos"] = photos[:5]
     return out
+
+
+def _photos_from_cache(id_: str) -> list[str]:
+    """Best-effort photo lookup for a sold/withdrawn ghost row. Reads the
+    same cache enrich.py wrote when the listing was active."""
+    path = ONSALE_CACHE / f"{id_}.json"
+    if not path.exists():
+        return []
+    try:
+        data = json.loads(path.read_text())
+    except Exception:
+        return []
+    return (data.get("photos") or [])[:5]
+
+
+def _ghost_from_history(rec: dict) -> dict | None:
+    """Convert a sold/withdrawn history record to a map-ready row. Skips
+    rows without coordinates (can't be placed) or without a predicted_price
+    (no useful color/calibration signal)."""
+    if rec.get("lat") is None or rec.get("lon") is None:
+        return None
+    last_ask = None
+    if rec.get("asking_history"):
+        last_ask = rec["asking_history"][-1][1]
+    pred = rec.get("predicted_price_kr")
+    sold = rec.get("sold_price_kr")
+    realized = None
+    if rec.get("status") == "sold" and pred and sold:
+        realized = round((pred - sold) / sold * 100, 1)
+    out = {
+        "href":               rec.get("sold_url") or rec["url"],
+        "address":            rec.get("address"),
+        "area":               rec.get("area"),
+        "lat":                rec.get("lat"),
+        "lon":                rec.get("lon"),
+        "bostadstyp":         rec.get("bostadstyp"),
+        "m2":                 rec.get("m2"),
+        "rooms":              rec.get("rooms"),
+        "kr_per_m2":          rec.get("kr_per_m2"),
+        "byggar":             rec.get("byggar"),
+        "vaning":             rec.get("vaning"),
+        "vaning_total":       rec.get("vaning_total"),
+        "hiss":               rec.get("hiss"),
+        "forening":           rec.get("forening"),
+        "predicted_price_kr": pred,
+        "deal_pct":           rec.get("deal_pct_last"),
+        "asking_price_kr":    last_ask,
+        "status":             rec["status"],
+        "sold_price_kr":      sold,
+        "sold_date":          rec.get("sold_date"),
+        "sold_url":           rec.get("sold_url"),
+        "realized_deal_pct":  realized,
+        "first_seen":         rec.get("first_seen"),
+        "last_seen":          rec.get("last_seen"),
+        "asking_history":     rec.get("asking_history"),
+        "min_to_odenplan":    rec.get("min_to_odenplan"),
+        "brf_akta":           rec.get("brf_akta"),
+        "brf_n_lgh":          rec.get("brf_n_lgh"),
+        "brf_arsavgift_kr_m2": rec.get("brf_arsavgift_kr_m2"),
+        "brf_belaning_kr_m2":  rec.get("brf_belaning_kr_m2"),
+        "photos":             _photos_from_cache(rec["id"]),
+    }
+    return out
+
+
+def load_history_ghosts(history_path: Path, live_ids: set[str]) -> list[dict]:
+    """Return one ghost row per sold/withdrawn history record whose id is
+    not in today's live snapshot."""
+    if not history_path.exists():
+        return []
+    ghosts: list[dict] = []
+    for line in open(history_path):
+        rec = json.loads(line)
+        if rec["id"] in live_ids:
+            continue
+        if rec.get("status") not in ("sold", "withdrawn"):
+            continue
+        row = _ghost_from_history(rec)
+        if row is not None:
+            ghosts.append(row)
+    return ghosts
 
 
 HTML_TEMPLATE = r"""<!doctype html>
@@ -292,11 +379,28 @@ function popupHtml(d) {
   const vaning = d.vaning != null
     ? `${d.vaning}${d.vaning_total ? ' av ' + d.vaning_total : ''}${d.hiss ? ', hiss' : ''}`
     : '–';
-  const dealBadge = d.deal_pct != null
-    ? `<span class="popup-deal" style="${dealStyle(d.deal_pct)}">${d.deal_pct > 0 ? '+' : ''}${d.deal_pct.toFixed(1)}%</span>`
+  const isSold = d.status === 'sold';
+  const isWithdrawn = d.status === 'withdrawn';
+  // For sold pins the headline metric is realized (sold vs predicted),
+  // not asking. Asking_deal goes into a secondary meta line.
+  const headlinePct = isSold && d.realized_deal_pct != null ? d.realized_deal_pct : d.deal_pct;
+  const dealBadge = headlinePct != null
+    ? `<span class="popup-deal" style="${dealStyle(headlinePct)}">${headlinePct > 0 ? '+' : ''}${headlinePct.toFixed(1)}%</span>`
     : '';
-  const dealNote = d.deal_pct != null
-    ? `<div class="popup-meta" style="font-size:11px;color:#888;margin-top:2px">vs predicted ${fmtKr(d.predicted_price_kr)}</div>`
+  const dealNote = headlinePct != null
+    ? `<div class="popup-meta" style="font-size:11px;color:#888;margin-top:2px">${isSold ? 'sold vs predicted' : 'vs predicted'} ${fmtKr(d.predicted_price_kr)}</div>`
+    : '';
+  const statusBanner = isSold
+    ? `<div class="popup-section" style="background:#f3f3f3;padding:6px 8px;border-radius:4px;margin-bottom:4px;border-top:0">
+         <b>Slutpris: ${fmtKr(d.sold_price_kr)}</b>
+         ${d.asking_price_kr ? ` <span style="color:#888;font-size:11px">(asked ${fmtKr(d.asking_price_kr)})</span>` : ''}
+         ${d.sold_date ? `<div style="font-size:11px;color:#888;margin-top:2px">Resolved ${d.sold_date}</div>` : ''}
+       </div>`
+    : isWithdrawn
+    ? `<div class="popup-section" style="background:#f3f3f3;padding:6px 8px;border-radius:4px;margin-bottom:4px;border-top:0;color:#666">
+         <b>Withdrawn</b>
+         ${d.last_seen ? `<span style="font-size:11px"> · last seen ${d.last_seen}</span>` : ''}
+       </div>`
     : '';
   const brfStats = [
     brfStat(d.brf_belaning_kr_m2, 'belaning', 'Belåning', 'kr/m²',
@@ -316,6 +420,7 @@ function popupHtml(d) {
     <div class="popup-section">
       <div class="popup-title">${d.address ?? ''}</div>
       <div class="popup-area">${d.area ?? ''}</div>
+      ${statusBanner}
       <div class="popup-price-row">
         <span class="popup-price">${fmtKr(d.asking_price_kr)}</span>
         ${dealBadge}
@@ -338,8 +443,12 @@ function popupHtml(d) {
   `;
 }
 
-// --- sort by deal_pct (descending; nulls last) -----------------------------
+// --- sort: actives first (by deal_pct desc, nulls last), then sold, then withdrawn
+const STATUS_RANK = { onsale: 0, kommande: 0, sold: 1, withdrawn: 2 };
 const sorted = [...LISTINGS].sort((a, b) => {
+  const ra = STATUS_RANK[a.status || 'onsale'] ?? 0;
+  const rb = STATUS_RANK[b.status || 'onsale'] ?? 0;
+  if (ra !== rb) return ra - rb;
   if (a.deal_pct == null && b.deal_pct == null) return 0;
   if (a.deal_pct == null) return 1;
   if (b.deal_pct == null) return -1;
@@ -373,11 +482,23 @@ function selectIndex(i, { fromMap = false } = {}) {
 sorted.forEach((d, i) => {
   const li = document.createElement('li');
   li.className = 'row';
-  const dealLabel = d.deal_pct != null
-    ? `<span class="deal" style="${dealStyle(d.deal_pct)};padding:2px 6px;border-radius:3px;">
-         ${d.deal_pct > 0 ? '+' : ''}${d.deal_pct.toFixed(1)}%
-       </span>`
-    : `<span class="deal deal-na" style="padding:2px 6px;border-radius:3px;">n/a</span>`;
+  // Sold rows show realized deal (sold vs predicted); active rows show asking
+  // deal. Withdrawn rows have no useful price signal.
+  const isSold = d.status === 'sold';
+  const isWithdrawn = d.status === 'withdrawn';
+  const labelPct = isSold && d.realized_deal_pct != null ? d.realized_deal_pct : d.deal_pct;
+  let dealLabel;
+  if (isWithdrawn) {
+    dealLabel = `<span class="deal deal-na" style="padding:2px 6px;border-radius:3px;">borttagen</span>`;
+  } else if (labelPct != null) {
+    const prefix = isSold ? 'sold ' : '';
+    dealLabel = `<span class="deal" style="${dealStyle(labelPct)};padding:2px 6px;border-radius:3px;">
+         ${prefix}${labelPct > 0 ? '+' : ''}${labelPct.toFixed(1)}%
+       </span>`;
+  } else {
+    dealLabel = `<span class="deal deal-na" style="padding:2px 6px;border-radius:3px;">n/a</span>`;
+  }
+  const priceShown = isSold ? d.sold_price_kr ?? d.asking_price_kr : d.asking_price_kr;
   const vaning = d.vaning != null
     ? `vån ${d.vaning}${d.vaning_total ? '/' + d.vaning_total : ''}${d.hiss ? ' (hiss)' : ''}` : '';
   const star = d.stadsdel_liquidity === 'high'
@@ -385,8 +506,9 @@ sorted.forEach((d, i) => {
   const ptypeSvg = BOSTADSTYP_ICON[d.bostadstyp];
   const ptypeIcon = ptypeSvg
     ? `<span class="ptype" title="${d.bostadstyp}">${ptypeSvg}</span>` : '';
+  if (isWithdrawn) li.style.opacity = '0.55';
   li.innerHTML = `
-    <div class="top">${dealLabel}<span class="price">${fmtKr(d.asking_price_kr)}</span></div>
+    <div class="top">${dealLabel}<span class="price">${fmtKr(priceShown)}</span></div>
     <div class="addr">${ptypeIcon}${star}${d.address ?? ''}</div>
     <div class="area">${d.area ?? ''}</div>
     <div class="meta">${fmtM2(d.m2)} · ${d.rooms ?? '–'} rum · ${fmtKr(d.kr_per_m2)}/m² ${vaning ? '· ' + vaning : ''}${
@@ -398,15 +520,38 @@ sorted.forEach((d, i) => {
   rows.push(li);
 });
 
+// Marker style by status. Active/kommande use the current deal-color scheme;
+// sold pins keep the same hue but on the realized (sold-vs-predicted) axis,
+// rendered as a colored ring on a pale fill so they read as "outcome" not
+// "opportunity". Withdrawn pins are faded gray with a dashed ring.
+function pinStyle(d) {
+  if (d.status === 'sold') {
+    const r = d.realized_deal_pct;
+    return {
+      radius: 8, weight: 2.5,
+      color: r != null ? dealColor(r) : '#888',
+      fillColor: '#e9e9e9', fillOpacity: 0.9
+    };
+  }
+  if (d.status === 'withdrawn') {
+    return {
+      radius: 7, weight: 1.5,
+      color: '#888', dashArray: '3,3',
+      fillColor: '#bbb', fillOpacity: 0.45
+    };
+  }
+  return {
+    radius: 9, weight: 2,
+    color: d.status === 'kommande' ? '#222' : 'white',
+    fillColor: dealColor(d.deal_pct), fillOpacity: 0.95
+  };
+}
+
 // Pass 2: build markers in REVERSE order (worst deals first, best on top).
 for (let i = sorted.length - 1; i >= 0; i--) {
   const d = sorted[i];
   if (d.lat == null || d.lon == null) continue;
-  const m = L.circleMarker([d.lat, d.lon], {
-    radius: 9, weight: 2,
-    color: d.status === 'kommande' ? '#222' : 'white',
-    fillColor: dealColor(d.deal_pct), fillOpacity: 0.95
-  }).addTo(map);
+  const m = L.circleMarker([d.lat, d.lon], pinStyle(d)).addTo(map);
   m.bindPopup(popupHtml(d), { maxWidth: 280, autoPan: false });
   m.on('popupopen', () => selectIndex(i, { fromMap: true }));
   markers[i] = m;
@@ -430,10 +575,12 @@ TYPE_GROUPS.forEach(g => g.matches.forEach(t => groupOf.set(t, g.key)));
 const selectedGroups = new Set(TYPE_GROUPS.map(g => g.key));
 
 const STATUS_FILTERS = [
-  { key: 'onsale',   label: 'Till salu' },
-  { key: 'kommande', label: 'Kommande' },
+  { key: 'onsale',    label: 'Till salu', defaultOn: true  },
+  { key: 'kommande',  label: 'Kommande',  defaultOn: true  },
+  { key: 'sold',      label: 'Sålda',     defaultOn: false },
+  { key: 'withdrawn', label: 'Borttagna', defaultOn: false },
 ];
-const selectedStatuses = new Set(STATUS_FILTERS.map(s => s.key));
+const selectedStatuses = new Set(STATUS_FILTERS.filter(s => s.defaultOn).map(s => s.key));
 
 // Pre-compute counts.
 const groupCounts = {}, statusCounts = {};
@@ -453,7 +600,7 @@ filtersEl.appendChild(statusRow);
 
 function makeFilterButton(label, count, selectedSet, key, iconHtml) {
   const btn = document.createElement('button');
-  btn.className = 'filter-btn active';
+  btn.className = selectedSet.has(key) ? 'filter-btn active' : 'filter-btn';
   btn.title = `Toggle ${label}`;
   btn.innerHTML = `${iconHtml || ''}<span>${label}</span><span class="count">${count}</span>`;
   btn.addEventListener('click', () => {
@@ -540,12 +687,19 @@ window.addEventListener('resize', () => map.invalidateSize());
 """
 
 
-def build(in_path_str: str, out_path_str: str | None = None):
+def build(in_path_str: str, out_path_str: str | None = None, history_path_str: str | None = None):
     in_path = Path(in_path_str)
     out_path = Path(out_path_str) if out_path_str else ROOT / "index.html"
     rows = [json.loads(l) for l in open(in_path)]
     pinned = [trim_row(r) for r in rows if r.get("lat") is not None]
     skipped = len(rows) - len(pinned)
+
+    ghosts: list[dict] = []
+    if history_path_str:
+        live_ids = {listing_id(r["href"]) for r in rows if r.get("href")}
+        ghosts = load_history_ghosts(Path(history_path_str), live_ids)
+        pinned.extend(trim_row(g) for g in ghosts)
+
     payload = json.dumps(pinned, ensure_ascii=False, separators=(",", ":"))
 
     # T-bana overlay data. Run `python3 fetch_tbana.py` to regenerate.
@@ -555,15 +709,17 @@ def build(in_path_str: str, out_path_str: str | None = None):
     html = HTML_TEMPLATE.replace("__DATA__", payload).replace("__TBANA__", tbana_payload)
     out_path.write_text(html)
     size_kb = out_path.stat().st_size / 1024
-    print(f"wrote {out_path}  ({len(pinned)} pinned, {skipped} skipped, {size_kb:.1f} KB)")
+    ghost_note = f", {len(ghosts)} ghosts from history" if ghosts else ""
+    print(f"wrote {out_path}  ({len(pinned)} pinned, {skipped} skipped{ghost_note}, {size_kb:.1f} KB)")
 
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("input")
     p.add_argument("--out")
+    p.add_argument("--history", help="data/history.jsonl — adds sold/withdrawn ghost pins")
     args = p.parse_args()
-    build(args.input, args.out)
+    build(args.input, args.out, args.history)
 
 
 if __name__ == "__main__":

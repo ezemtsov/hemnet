@@ -470,16 +470,18 @@ function popupHtml(d) {
   `;
 }
 
-// --- sort: actives first (by deal_pct desc, nulls last), then sold, then withdrawn
+// --- sort: actives first (newest published_at first, nulls last), then sold, then withdrawn
 const STATUS_RANK = { onsale: 0, kommande: 0, sold: 1, withdrawn: 2 };
 const sorted = [...LISTINGS].sort((a, b) => {
   const ra = STATUS_RANK[a.status || 'onsale'] ?? 0;
   const rb = STATUS_RANK[b.status || 'onsale'] ?? 0;
   if (ra !== rb) return ra - rb;
-  if (a.deal_pct == null && b.deal_pct == null) return 0;
-  if (a.deal_pct == null) return 1;
-  if (b.deal_pct == null) return -1;
-  return b.deal_pct - a.deal_pct;
+  const pa = a.published_at || '';
+  const pb = b.published_at || '';
+  if (pa === pb) return 0;
+  if (!pa) return 1;
+  if (!pb) return -1;
+  return pb.localeCompare(pa);
 });
 
 // --- create one marker + one list row per listing, connected ---------------
@@ -693,7 +695,7 @@ function updateVisibility() {
     row.style.display = show ? '' : 'none';
     if (show) visible++;
   }
-  subEl.textContent = `${visible} of ${sorted.length} in view · ${pinned} pinned · sorted by deal score`;
+  subEl.textContent = `${visible} of ${sorted.length} in view · ${pinned} pinned · sorted by newest`;
 }
 map.on('moveend', updateVisibility);
 updateVisibility();

@@ -53,7 +53,7 @@ default origin policy rejects CDP from `http://localhost:N` otherwise).
   worker pool (e.g. `9223,9224,9225`). Overrides `HEMNET_CDP_PORT` in
   `enrich.py`. update.sh sets this from `${CDP_PORT}..${CDP_PORT}+PARALLEL-1`.
 - `ONSALE_URL` — overrides the default onsale filter URL in `update.sh`.
-- `PARALLEL` — shard count for enrich (default 1). See main loop section.
+- `PARALLEL` — shard count for enrich (default 10). See main loop section.
 
 ## Environment quirks
 

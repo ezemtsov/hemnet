@@ -11,13 +11,14 @@ import argparse, json
 from pathlib import Path
 
 from enrich import listing_id
+from score import region_of
 
 ROOT = Path(__file__).parent
 
 POPUP_FIELDS = (
     "href address area asking_price_kr m2 rooms kr_per_m2 byggar vaning vaning_total "
     "hiss forening photos lat lon visning predicted_price_kr deal_pct stadsdel_liquidity "
-    "bostadstyp status min_to_odenplan published_at "
+    "bostadstyp status min_to_odenplan published_at region "
     "brf_akta brf_n_lgh brf_arsavgift_kr_m2 brf_belaning_kr_m2 "
     "sold_price_kr sold_date sold_url realized_deal_pct first_seen last_seen "
     "asking_history"
@@ -65,6 +66,7 @@ def _ghost_from_history(rec: dict) -> dict | None:
         "href":               rec.get("sold_url") or rec["url"],
         "address":            rec.get("address"),
         "area":               rec.get("area"),
+        "region":             region_of(rec.get("area")),
         "lat":                rec.get("lat"),
         "lon":                rec.get("lon"),
         "bostadstyp":         rec.get("bostadstyp"),
@@ -615,21 +617,32 @@ const STATUS_FILTERS = [
 ];
 const selectedStatuses = new Set(STATUS_FILTERS.filter(s => s.defaultOn).map(s => s.key));
 
+// Region filter — inner/outer split matches score.py's INOM_TULLARNA set
+// (carried on each row as `region` ∈ {inner, outer}).
+const REGION_FILTERS = [
+  { key: 'inner', label: 'Inom tullarna' },
+  { key: 'outer', label: 'Utom tullarna' },
+];
+const selectedRegions = new Set(REGION_FILTERS.map(r => r.key));
+
 // Pre-compute counts.
-const groupCounts = {}, statusCounts = {};
+const groupCounts = {}, statusCounts = {}, regionCounts = {};
 sorted.forEach(d => {
   const g = groupOf.get(d.bostadstyp);
   if (g) groupCounts[g] = (groupCounts[g] || 0) + 1;
   const s = d.status || 'onsale';
   statusCounts[s] = (statusCounts[s] || 0) + 1;
+  if (d.region) regionCounts[d.region] = (regionCounts[d.region] || 0) + 1;
 });
 
 // Render two filter rows: property type (with icons) and status (text-only).
 const filtersEl = document.getElementById('filters');
 const typeRow   = document.createElement('div'); typeRow.className   = 'filter-group';
 const statusRow = document.createElement('div'); statusRow.className = 'filter-group';
+const regionRow = document.createElement('div'); regionRow.className = 'filter-group';
 filtersEl.appendChild(typeRow);
 filtersEl.appendChild(statusRow);
+filtersEl.appendChild(regionRow);
 
 function makeFilterButton(label, count, selectedSet, key, iconHtml) {
   const btn = document.createElement('button');
@@ -664,6 +677,10 @@ STATUS_FILTERS.forEach(s => {
   if (!statusCounts[s.key]) return;
   statusRow.appendChild(makeFilterButton(s.label, statusCounts[s.key], selectedStatuses, s.key));
 });
+REGION_FILTERS.forEach(r => {
+  if (!regionCounts[r.key]) return;
+  regionRow.appendChild(makeFilterButton(r.label, regionCounts[r.key], selectedRegions, r.key));
+});
 
 function passesTypeFilter(d) {
   const g = groupOf.get(d.bostadstyp);
@@ -672,6 +689,10 @@ function passesTypeFilter(d) {
 }
 function passesStatusFilter(d) {
   return selectedStatuses.has(d.status || 'onsale');
+}
+function passesRegionFilter(d) {
+  // Rows without a region tag (rare; older history records pre-region) pass through.
+  return !d.region || selectedRegions.has(d.region);
 }
 
 // Hide sidebar rows that fall outside the current map viewport or don't
@@ -682,7 +703,7 @@ function updateVisibility() {
   let visible = 0;
   for (let i = 0; i < sorted.length; i++) {
     const d = sorted[i], row = rows[i], marker = markers[i];
-    const filterOk = passesTypeFilter(d) && passesStatusFilter(d);
+    const filterOk = passesTypeFilter(d) && passesStatusFilter(d) && passesRegionFilter(d);
     if (marker) {
       const onMap = map.hasLayer(marker);
       if (filterOk && !onMap) marker.addTo(map);

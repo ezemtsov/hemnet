@@ -9,7 +9,7 @@
 # The sold dataset is refreshed separately (monthly) via the longer pipeline
 # in README; this script picks the latest sold-*.enriched.jsonl in data/.
 #
-# Parallel enrich: export PARALLEL=N (default 1). Maps to a Python-internal
+# Parallel enrich: export PARALLEL=N (default 10). Maps to a Python-internal
 # worker pool inside enrich.py (one process, N threads, each driving a
 # Chromium on a distinct port CDP_PORT..CDP_PORT+N-1 with profile dirs
 # USER_DATA[-i]). Workers pull from a shared queue → no shard pre-allocation,
@@ -27,7 +27,9 @@ ONSALE_URL="${ONSALE_URL:-https://www.hemnet.se/bostader?price_max=8000000&livin
 KOMMANDE_URL="${KOMMANDE_URL:-https://www.hemnet.se/kommande/bostader?price_max=8000000&living_area_min=60&rooms_min=2.5&location_ids%5B%5D=18031}"
 CDP_PORT="${CDP_PORT:-9223}"
 USER_DATA="${USER_DATA:-/tmp/chromium-onsale}"
-PARALLEL="${PARALLEL:-1}"
+# PARALLEL=10 cuts first-of-day runs from ~60 min to ~6 min. Drop to 4 on
+# 16 GB hosts (each Chromium ≈ 300 MB). See CLAUDE.md for sizing.
+PARALLEL="${PARALLEL:-10}"
 DATE="$(date +%F)"
 
 echo "▸ on-sale refresh for ${DATE}  (parallel=${PARALLEL})"
@@ -80,44 +82,33 @@ for i in $(seq 0 $((PARALLEL - 1))); do
   ensure_chromium $((CDP_PORT + i)) "$(shard_profile "$i")"
 done
 
-echo
-echo "▸ scrape"
-HEMNET_CDP_PORT="${CDP_PORT}" python3 scrape.py --url "${ONSALE_URL}"
-
-ONSALE_JSONL="data/onsale-${DATE}.jsonl"
-ENRICHED_JSONL="data/onsale-${DATE}.enriched.jsonl"
-
 CDP_PORTS=$(seq -s, "${CDP_PORT}" $((CDP_PORT + PARALLEL - 1)))
 
+# Scrape both onsale and kommande into separate JSONLs (scrape.py infers the
+# kind from the URL path and tags each row's `status` field). Merge them
+# before enrich so the worker pool drains the combined batch in one parallel
+# pass instead of two staged ones. Per-row `status` survives the merge and
+# keeps the build_map filter UI working; cache namespace is shared.
 echo
-echo "▸ enrich  (pool=${PARALLEL} on ports ${CDP_PORTS})"
-HEMNET_CDP_PORTS="${CDP_PORTS}" python3 enrich.py "${ONSALE_JSONL}" ${CACHE_TTL_HOURS:+--cache-ttl-hours "${CACHE_TTL_HOURS}"}
-
-echo
-echo "▸ geocode"
-python3 geocode.py "${ENRICHED_JSONL}"
-
-# Kommande pipeline — smaller than onsale (~30-200 listings). Shares the
-# onsale cache namespace (set in enrich.py CACHE_NAMESPACE) since detail-page
-# URLs/structure are identical; reuses the same worker pool.
-KOMMANDE_JSONL="data/kommande-${DATE}.jsonl"
-KOMMANDE_ENRICHED="data/kommande-${DATE}.enriched.jsonl"
+echo "▸ scrape onsale"
+HEMNET_CDP_PORT="${CDP_PORT}" python3 scrape.py --url "${ONSALE_URL}"
 echo
 echo "▸ scrape kommande"
 HEMNET_CDP_PORT="${CDP_PORT}" python3 scrape.py --url "${KOMMANDE_URL}"
-echo
-echo "▸ enrich kommande  (pool=${PARALLEL})"
-HEMNET_CDP_PORTS="${CDP_PORTS}" python3 enrich.py "${KOMMANDE_JSONL}" ${CACHE_TTL_HOURS:+--cache-ttl-hours "${CACHE_TTL_HOURS}"}
-echo
-echo "▸ geocode kommande"
-python3 geocode.py "${KOMMANDE_ENRICHED}"
 
-# Merge onsale + kommande into one live snapshot for scoring and map build.
+LIVE_JSONL="data/live-${DATE}.jsonl"
+LIVE_ENRICHED="data/live-${DATE}.enriched.jsonl"
 LIVE_GEO="data/live-${DATE}.enriched.geo.jsonl"
-cat "data/onsale-${DATE}.enriched.geo.jsonl" \
-    "data/kommande-${DATE}.enriched.geo.jsonl" > "${LIVE_GEO}"
+cat "data/onsale-${DATE}.jsonl" "data/kommande-${DATE}.jsonl" > "${LIVE_JSONL}"
+echo "▸ merged onsale + kommande → ${LIVE_JSONL} ($(wc -l < "${LIVE_JSONL}") rows)"
+
 echo
-echo "▸ merged onsale + kommande → ${LIVE_GEO} ($(wc -l < "${LIVE_GEO}") rows)"
+echo "▸ enrich  (pool=${PARALLEL} on ports ${CDP_PORTS})"
+HEMNET_CDP_PORTS="${CDP_PORTS}" python3 enrich.py "${LIVE_JSONL}" ${CACHE_TTL_HOURS:+--cache-ttl-hours "${CACHE_TTL_HOURS}"}
+
+echo
+echo "▸ geocode"
+python3 geocode.py "${LIVE_ENRICHED}"
 
 echo
 echo "▸ route (transit minutes to Odenplan via Trafiklab/ResRobot)"

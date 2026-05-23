@@ -372,14 +372,28 @@ def _process_row(cdp: CDP, row: dict, cache_dir: Path, kind: str, ttl_h: float |
     one of: hits / stale_refetched / fetched_new / failed."""
     url = row["href"]
     cache_path = cache_dir / f"{listing_id(url)}.json"
-    if cache_is_fresh(cache_path, ttl_h):
+    current_asking = row.get("asking_price_kr")
+    if cache_path.exists():
         facts = json.loads(cache_path.read_text())
-        return merge_row_with_facts(row, facts), "hits"
+        # Asking-price short-circuit: if today's scrape shows the same asking
+        # price we recorded when this cache was last written, the listing
+        # almost certainly hasn't changed in any way the model cares about
+        # — reuse the detail-page facts regardless of TTL. Saves ~90% of
+        # daily refetches on a stable market. asking_history still tracks
+        # price drops because it's fed from the scrape row, not the cache.
+        cached_asking = facts.get("_cache_asking_price_kr")
+        if cached_asking is not None and current_asking is not None and cached_asking == current_asking:
+            return merge_row_with_facts(row, facts), "hits"
+        # Legacy entries (no _cache_asking_price_kr) fall back to TTL — they
+        # get the asking stamp on next write and short-circuit from then on.
+        if cache_is_fresh(cache_path, ttl_h):
+            return merge_row_with_facts(row, facts), "hits"
     had_cache = cache_path.exists()
     facts = fetch_facts(cdp, url, kind)
     if facts is None:
         # URL- and description-based bostadstyp inference still runs via merge.
         return merge_row_with_facts(row, {}), "failed"
+    facts["_cache_asking_price_kr"] = current_asking
     cache_path.write_text(json.dumps(facts, ensure_ascii=False))
     time.sleep(delay_s)
     return merge_row_with_facts(row, facts), ("stale_refetched" if had_cache else "fetched_new")

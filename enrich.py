@@ -365,10 +365,18 @@ def fetch_facts(cdp: CDP, url: str, kind: str, *, timeout_s: float = 21.0) -> di
             time.sleep(0.3)
             # Expand "Visa mer / Läs mer" sections so the BRF panel exposes
             # the explicit Äger marken / Antal lägenheter rows (needed for
-            # tomträtt detection on the newer layout).
+            # tomträtt detection on the newer layout). The expanded section
+            # is lazy-rendered; a fixed sleep is unreliable under PARALLEL=10
+            # load (one of the workers will time-slice past the render),
+            # so poll for any BRF label up to ~3s and proceed regardless.
             cdp.eval(EXPAND_BRF_JS)
-            time.sleep(0.4)
-            body = cdp.eval("document.body.innerText")
+            brf_deadline = time.time() + 3.0
+            body = ""
+            while time.time() < brf_deadline:
+                body = cdp.eval("document.body.innerText") or ""
+                if any(k in body for k in ("Antal lägenheter", "Belåning", "Äger marken")):
+                    break
+                time.sleep(0.2)
             facts = parse_facts(extract_facts(body, labels), kind)
             facts.update(parse_brf_facts(extract_brf_facts(body)))
             facts["photos"] = extract_photos(cdp.eval(PHOTOS_JS) or [])

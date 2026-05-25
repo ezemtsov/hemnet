@@ -226,16 +226,16 @@ HTML_TEMPLATE = r"""<!doctype html>
   }
   .like-btn:hover { color: #f59e0b; transform: scale(1.08); }
   .like-btn.liked { color: #f59e0b; border-color: #f59e0b; }
-  /* "Seen" eye overlay — a Leaflet permanent tooltip rendered dead-center
-     over the marker. Strip Leaflet's default chrome and let pointer
-     events fall through to the marker beneath. */
+  /* "Seen" eye overlay — a Leaflet permanent tooltip positioned at the
+     bottom-right of the marker (offset set per-marker in JS so it tracks
+     the radius). Strip Leaflet's chrome and pass pointer events through. */
   .leaflet-tooltip.seen-marker {
     background: transparent !important;
     border: none !important;
     box-shadow: none !important;
     padding: 0 !important;
     margin: 0 !important;
-    font-size: 11px;
+    font-size: 8px;
     line-height: 1;
     pointer-events: none;
     white-space: nowrap;
@@ -663,11 +663,16 @@ function syncLikeButton(btn, href) {
 }
 
 // Pin the eye emoji on the marker. Idempotent — calling twice is harmless.
+// Position bottom-right by offsetting ~0.7 * radius along both axes (the
+// 45° diagonal of the circle), so the eye sits at ~quarter-marker size
+// in the corner regardless of which status radius we got.
 function ensureSeenOverlay(marker) {
   if (marker._seenOverlay) return;
+  const r = (marker.options && marker.options.radius) || 9;
+  const off = Math.round(r * 0.7);
   marker.bindTooltip('👁', {
     permanent: true, direction: 'center',
-    className: 'seen-marker', offset: [0, 0],
+    className: 'seen-marker', offset: [off, off],
   }).openTooltip();
   marker._seenOverlay = true;
 }

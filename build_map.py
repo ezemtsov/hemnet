@@ -239,7 +239,7 @@ HTML_TEMPLATE = r"""<!doctype html>
     box-shadow: none !important;
     padding: 0 !important;
     margin: 0 !important;
-    font-size: 8px;
+    font-size: 12px;
     line-height: 1;
     pointer-events: none;
     white-space: nowrap;

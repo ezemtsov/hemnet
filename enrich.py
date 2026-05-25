@@ -91,9 +91,11 @@ NAME_MAP_ONSALE = {
 # BRF section is BELOW the main facts panel (after Visningstider/Räkna),
 # so the standard extract_facts slice misses it. Extracted separately
 # from the full body. Equally applicable to sold and onsale listings.
-LABELS_BRF = ["Äkta förening", "Antal lägenheter", "Årsavgift", "Belåning"]
+LABELS_BRF = ["Status", "Äkta förening", "Äger marken", "Antal lägenheter", "Årsavgift", "Belåning"]
 NAME_MAP_BRF = {
-    "Äkta förening":    "brf_akta_raw",        # value usually "Äger marken"
+    "Status":           "_brf_status_raw",        # value: "Äkta förening" / "Oäkta förening" (new layout)
+    "Äkta förening":    "_brf_akta_legacy_raw",   # value usually "Äger marken" / "Tomträtt" (old layout)
+    "Äger marken":      "_brf_ager_marken_raw",   # value: "Ja" / "Nej" (new layout — Nej = tomträtt)
     "Antal lägenheter": "_brf_n_lgh_raw",
     "Årsavgift":        "_brf_arsavgift_raw",  # "458 kr/m²"
     "Belåning":         "_brf_belaning_raw",   # "7 kr/m²" (= per-m² debt)
@@ -185,18 +187,48 @@ def extract_brf_facts(body_text: str) -> dict:
 
 
 def parse_brf_facts(raw: dict) -> dict:
-    out: dict = {NAME_MAP_BRF[k]: v for k, v in raw.items() if k in NAME_MAP_BRF}
-    if (s := out.pop("brf_akta_raw", None)):
-        # Hemnet shows "Äger marken" when the BRF is äkta and owns the land
-        # (no tomträtt). Tomträtt BRFs show "Tomträtt" in this slot.
-        out["brf_akta"] = "äger marken" in s.lower()
-        out["brf_marknad_raw"] = s
-    if (s := out.pop("_brf_n_lgh_raw", None)):
-        out["brf_n_lgh"] = num(s)
-    if (s := out.pop("_brf_arsavgift_raw", None)):
-        out["brf_arsavgift_kr_m2"] = num(s.replace("kr/m²", ""))
-    if (s := out.pop("_brf_belaning_raw", None)):
-        out["brf_belaning_kr_m2"] = num(s.replace("kr/m²", ""))
+    """Resolve äkta + tomträtt across two Hemnet layouts:
+
+    - **New** (post-2025): the BRF panel uses explicit label/value rows.
+      `Status: Äkta förening|Oäkta förening` and `Äger marken: Ja|Nej`.
+      Only visible after expanding "Visa mer".
+    - **Legacy**: a single "Äkta förening" label whose "value" is the
+      next line — either `Äger marken` (no tomträtt) or `Tomträtt`.
+
+    We capture both shapes and prefer the new one. Ownership is exposed
+    as `brf_ager_marken: bool|None` (False = tomträtt).
+    """
+    f = {NAME_MAP_BRF[k]: v for k, v in raw.items() if k in NAME_MAP_BRF}
+    out: dict = {}
+
+    # --- Tomträtt / Äger marken ---
+    if (s := f.get("_brf_ager_marken_raw")) is not None:
+        lo = s.strip().lower()
+        if lo == "ja":  out["brf_ager_marken"] = True
+        elif lo == "nej": out["brf_ager_marken"] = False
+    legacy_owner = f.get("_brf_akta_legacy_raw")
+    if "brf_ager_marken" not in out and legacy_owner is not None:
+        lo = legacy_owner.strip().lower()
+        if lo == "äger marken": out["brf_ager_marken"] = True
+        elif lo == "tomträtt":  out["brf_ager_marken"] = False
+    if legacy_owner is not None:
+        # Preserved for diagnostics / older callers.
+        out["brf_marknad_raw"] = legacy_owner
+
+    # --- Äkta förening ---
+    if (s := f.get("_brf_status_raw")) is not None:
+        lo = s.strip().lower()
+        if "oäkta" in lo:  out["brf_akta"] = False
+        elif "äkta" in lo: out["brf_akta"] = True
+    if "brf_akta" not in out and legacy_owner is not None:
+        # In the legacy layout the mere presence of "Äkta förening" as a
+        # label implied yes-äkta; the captured "value" was ownership info.
+        out["brf_akta"] = True
+
+    # --- Numerics ---
+    if (s := f.get("_brf_n_lgh_raw")):       out["brf_n_lgh"] = num(s)
+    if (s := f.get("_brf_arsavgift_raw")):   out["brf_arsavgift_kr_m2"] = num(s.replace("kr/m²", ""))
+    if (s := f.get("_brf_belaning_raw")):    out["brf_belaning_kr_m2"] = num(s.replace("kr/m²", ""))
     return out
 
 
@@ -312,6 +344,16 @@ def extract_published_at(scripts: list[str]) -> str | None:
     return None
 
 
+EXPAND_BRF_JS = r"""
+[...document.querySelectorAll('button')].forEach(b => {
+  const t = (b.textContent || '').toLowerCase();
+  if (t.includes('visa mer') || t.includes('läs mer') || t.includes('mer info')) {
+    try { b.click(); } catch(_) {}
+  }
+});
+"""
+
+
 def fetch_facts(cdp: CDP, url: str, kind: str, *, timeout_s: float = 21.0) -> dict | None:
     cdp.navigate(url)
     ready = ready_js_for(kind)
@@ -321,6 +363,11 @@ def fetch_facts(cdp: CDP, url: str, kind: str, *, timeout_s: float = 21.0) -> di
         time.sleep(0.35)
         if cdp.eval(ready):
             time.sleep(0.3)
+            # Expand "Visa mer / Läs mer" sections so the BRF panel exposes
+            # the explicit Äger marken / Antal lägenheter rows (needed for
+            # tomträtt detection on the newer layout).
+            cdp.eval(EXPAND_BRF_JS)
+            time.sleep(0.4)
             body = cdp.eval("document.body.innerText")
             facts = parse_facts(extract_facts(body, labels), kind)
             facts.update(parse_brf_facts(extract_brf_facts(body)))
@@ -373,7 +420,10 @@ def _process_row(cdp: CDP, row: dict, cache_dir: Path, kind: str, ttl_h: float |
     url = row["href"]
     cache_path = cache_dir / f"{listing_id(url)}.json"
     current_asking = row.get("asking_price_kr")
-    if cache_path.exists():
+    # ttl_h == 0 is the documented "force full re-fetch" escape hatch
+    # (e.g. for a schema backfill); skip both the asking-price short-
+    # circuit and the TTL check so every row goes back over the wire.
+    if cache_path.exists() and ttl_h != 0:
         facts = json.loads(cache_path.read_text())
         # Asking-price short-circuit: if today's scrape shows the same asking
         # price we recorded when this cache was last written, the listing

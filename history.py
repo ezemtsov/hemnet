@@ -43,8 +43,9 @@ SNAPSHOT_FIELDS = [
     "address", "area", "lat", "lon", "bostadstyp",
     "m2", "rooms", "kr_per_m2", "byggar", "vaning", "vaning_total", "hiss",
     "forening", "predicted_price_kr", "stadsdel_liquidity",
-    "brf_akta", "brf_n_lgh", "brf_arsavgift_kr_m2", "brf_belaning_kr_m2",
-    "min_to_odenplan", "published_at", "tags",
+    "brf_akta", "brf_ager_marken", "brf_n_lgh",
+    "brf_arsavgift_kr_m2", "brf_belaning_kr_m2",
+    "min_to_odenplan", "published_at", "tags", "is_tomratt",
 ]
 
 

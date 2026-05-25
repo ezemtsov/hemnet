@@ -18,8 +18,8 @@ ROOT = Path(__file__).parent
 POPUP_FIELDS = (
     "href address area asking_price_kr m2 rooms kr_per_m2 byggar vaning vaning_total "
     "hiss forening photos lat lon visning predicted_price_kr deal_pct stadsdel_liquidity "
-    "bostadstyp status min_to_odenplan published_at region tags "
-    "brf_akta brf_n_lgh brf_arsavgift_kr_m2 brf_belaning_kr_m2 "
+    "bostadstyp status min_to_odenplan published_at region tags is_tomratt "
+    "brf_akta brf_ager_marken brf_n_lgh brf_arsavgift_kr_m2 brf_belaning_kr_m2 "
     "sold_price_kr sold_date sold_url realized_deal_pct first_seen last_seen "
     "asking_history"
 ).split()
@@ -78,6 +78,9 @@ def _ghost_from_history(rec: dict) -> dict | None:
         "vaning_total":       rec.get("vaning_total"),
         "hiss":               rec.get("hiss"),
         "tags":               rec.get("tags"),
+        "is_tomratt":         bool(rec.get("is_tomratt")) if rec.get("is_tomratt") is not None
+                              else (rec.get("brf_ager_marken") is False),
+        "brf_ager_marken":    rec.get("brf_ager_marken"),
         "forening":           rec.get("forening"),
         "predicted_price_kr": pred,
         "deal_pct":           rec.get("deal_pct_last"),
@@ -171,9 +174,10 @@ HTML_TEMPLATE = r"""<!doctype html>
   .filter-btn.active { background: #2a6df4; color: #fff; border-color: #2a6df4; }
   /* Per-group accent — keeps it obvious which row each button belongs to
      as the filter set grows. Type stays on the default blue. */
-  .fg-status  .filter-btn.active { background: #1f9930; border-color: #1f9930; }
-  .fg-region  .filter-btn.active { background: #7c3aed; border-color: #7c3aed; }
-  .fg-feature .filter-btn.active { background: #d97706; border-color: #d97706; }
+  .fg-status    .filter-btn.active { background: #1f9930; border-color: #1f9930; }
+  .fg-region    .filter-btn.active { background: #7c3aed; border-color: #7c3aed; }
+  .fg-feature   .filter-btn.active { background: #d97706; border-color: #d97706; }
+  .fg-ownership .filter-btn.active { background: #444;    border-color: #444;    }
   .filter-btn .count { opacity: 0.7; }
   ul#list { list-style: none; padding: 0; margin: 0; }
   li.row { padding: 10px 14px; border-bottom: 1px solid #eee; cursor: pointer; transition: background .12s; }
@@ -660,9 +664,16 @@ function pinStyle(d) {
       fillColor: dealColor(d.deal_pct), fillOpacity: 0.95
     };
   }
+  // Tomträtt: solid black fill so these listings read as visually distinct
+  // — the deal-color underneath would otherwise advertise a deal that the
+  // model can't actually evaluate (ownership cost isn't priced in).
+  if (d.is_tomratt) {
+    s.fillColor = '#000';
+    s.fillOpacity = 0.95;
+  }
   // Liked overrides the border with gold so the marker pops without
-  // hiding the deal-color fill. Seen state is rendered separately as
-  // a transparent eye-emoji tooltip overlay (see ensureSeenOverlay).
+  // hiding the (possibly black) fill. Seen state is rendered separately
+  // as a transparent eye-emoji tooltip overlay (ensureSeenOverlay).
   if (likedSet.has(d.href)) {
     s.color = '#f59e0b';
     s.weight = Math.max(s.weight, 3);
@@ -770,6 +781,14 @@ const FEATURE_FILTERS = [
   { key: 'Uteplats', label: 'Uteplats' },
 ];
 
+// Ownership filter — Bostadsrätt vs Tomträtt. Both active by default;
+// untoggle Tomträtt to hide leasehold-land listings (their deal_pct
+// is unreliable because the model can't see ground-rent burden).
+const OWNERSHIP_FILTERS = [
+  { key: 'br',       label: 'Bostadsrätt' },
+  { key: 'tomtratt', label: 'Tomträtt'    },
+];
+
 // Filter selection persists in localStorage so the user doesn't have to
 // re-pick after every refresh. Fall back to per-group defaults when
 // nothing is saved yet. Unknown keys in the saved blob (e.g. a feature
@@ -782,21 +801,23 @@ function loadFilters() {
 function saveFilters() {
   try {
     localStorage.setItem(STORE_FILTERS, JSON.stringify({
-      groups:   [...selectedGroups],
-      statuses: [...selectedStatuses],
-      regions:  [...selectedRegions],
-      features: [...selectedFeatures],
+      groups:    [...selectedGroups],
+      statuses:  [...selectedStatuses],
+      regions:   [...selectedRegions],
+      features:  [...selectedFeatures],
+      ownership: [...selectedOwnership],
     }));
   } catch (_e) { /* quota / disabled — silently no-op */ }
 }
 const savedFilters = loadFilters();
-const selectedGroups   = new Set(savedFilters?.groups   ?? TYPE_GROUPS.map(g => g.key));
-const selectedStatuses = new Set(savedFilters?.statuses ?? STATUS_FILTERS.filter(s => s.defaultOn).map(s => s.key));
-const selectedRegions  = new Set(savedFilters?.regions  ?? REGION_FILTERS.map(r => r.key));
-const selectedFeatures = new Set(savedFilters?.features ?? []);
+const selectedGroups    = new Set(savedFilters?.groups    ?? TYPE_GROUPS.map(g => g.key));
+const selectedStatuses  = new Set(savedFilters?.statuses  ?? STATUS_FILTERS.filter(s => s.defaultOn).map(s => s.key));
+const selectedRegions   = new Set(savedFilters?.regions   ?? REGION_FILTERS.map(r => r.key));
+const selectedFeatures  = new Set(savedFilters?.features  ?? []);
+const selectedOwnership = new Set(savedFilters?.ownership ?? OWNERSHIP_FILTERS.map(o => o.key));
 
 // Pre-compute counts.
-const groupCounts = {}, statusCounts = {}, regionCounts = {}, featureCounts = {};
+const groupCounts = {}, statusCounts = {}, regionCounts = {}, featureCounts = {}, ownershipCounts = {};
 sorted.forEach(d => {
   const g = groupOf.get(d.bostadstyp);
   if (g) groupCounts[g] = (groupCounts[g] || 0) + 1;
@@ -804,18 +825,22 @@ sorted.forEach(d => {
   statusCounts[s] = (statusCounts[s] || 0) + 1;
   if (d.region) regionCounts[d.region] = (regionCounts[d.region] || 0) + 1;
   (d.tags || []).forEach(t => { featureCounts[t] = (featureCounts[t] || 0) + 1; });
+  const ok = d.is_tomratt ? 'tomtratt' : 'br';
+  ownershipCounts[ok] = (ownershipCounts[ok] || 0) + 1;
 });
 
 // Render two filter rows: property type (with icons) and status (text-only).
 const filtersEl = document.getElementById('filters');
-const typeRow    = document.createElement('div'); typeRow.className    = 'filter-group fg-type';
-const statusRow  = document.createElement('div'); statusRow.className  = 'filter-group fg-status';
-const regionRow  = document.createElement('div'); regionRow.className  = 'filter-group fg-region';
-const featureRow = document.createElement('div'); featureRow.className = 'filter-group fg-feature';
+const typeRow      = document.createElement('div'); typeRow.className      = 'filter-group fg-type';
+const statusRow    = document.createElement('div'); statusRow.className    = 'filter-group fg-status';
+const regionRow    = document.createElement('div'); regionRow.className    = 'filter-group fg-region';
+const featureRow   = document.createElement('div'); featureRow.className   = 'filter-group fg-feature';
+const ownershipRow = document.createElement('div'); ownershipRow.className = 'filter-group fg-ownership';
 filtersEl.appendChild(typeRow);
 filtersEl.appendChild(statusRow);
 filtersEl.appendChild(regionRow);
 filtersEl.appendChild(featureRow);
+filtersEl.appendChild(ownershipRow);
 
 function makeFilterButton(label, count, selectedSet, key, iconHtml) {
   const btn = document.createElement('button');
@@ -860,6 +885,10 @@ FEATURE_FILTERS.forEach(f => {
   if (!featureCounts[f.key]) return;
   featureRow.appendChild(makeFilterButton(f.label, featureCounts[f.key], selectedFeatures, f.key));
 });
+OWNERSHIP_FILTERS.forEach(o => {
+  if (!ownershipCounts[o.key]) return;
+  ownershipRow.appendChild(makeFilterButton(o.label, ownershipCounts[o.key], selectedOwnership, o.key));
+});
 
 function passesTypeFilter(d) {
   const g = groupOf.get(d.bostadstyp);
@@ -882,6 +911,9 @@ function passesFeatureFilter(d) {
   for (const f of selectedFeatures) if (!tags.includes(f)) return false;
   return true;
 }
+function passesOwnershipFilter(d) {
+  return selectedOwnership.has(d.is_tomratt ? 'tomtratt' : 'br');
+}
 
 // Hide sidebar rows that fall outside the current map viewport or don't
 // match the selected property-type filters. Map markers reflect only the
@@ -891,7 +923,8 @@ function updateVisibility() {
   let visible = 0;
   for (let i = 0; i < sorted.length; i++) {
     const d = sorted[i], row = rows[i], marker = markers[i];
-    const filterOk = passesTypeFilter(d) && passesStatusFilter(d) && passesRegionFilter(d) && passesFeatureFilter(d);
+    const filterOk = passesTypeFilter(d) && passesStatusFilter(d) && passesRegionFilter(d)
+                     && passesFeatureFilter(d) && passesOwnershipFilter(d);
     if (marker) {
       const onMap = map.hasLayer(marker);
       if (filterOk && !onMap) marker.addTo(map);

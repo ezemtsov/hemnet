@@ -142,7 +142,10 @@ def featurize(row: dict, stadsdel_medians: dict | None = None,
     bostadstyp = row.get("bostadstyp") or ""
     upplat = row.get("upplatelseform") or ""
     is_house = 1 if bostadstyp in HOUSE_TYPES else 0
-    is_tomratt = 1 if upplat == "Tomträtt" else 0
+    # brf_ager_marken == False is the explicit "Nej" from the BRF panel's
+    # Äger marken row (new Hemnet layout). On most onsale rows upplatelseform
+    # is hidden, so this is the more reliable signal when present.
+    is_tomratt = 1 if (upplat == "Tomträtt" or row.get("brf_ager_marken") is False) else 0
     is_aganderatt = 1 if upplat == "Äganderätt" else 0
     is_andel = 1 if upplat == "Andel i bostadsförening" else 0
 
@@ -490,6 +493,13 @@ def run(sold_path: str, onsale_path: str, out_path: str | None = None):
         row["predicted_price_kr"] = int(round(pred))
         row["deal_pct"] = round(deal_pct, 1) if deal_pct is not None else None
         row["region"] = region
+        # Surface tomträtt detection for downstream display (build_map),
+        # mirroring the featurize logic. brf_ager_marken == False is the
+        # primary signal on onsale; upplatelseform is rarely populated.
+        row["is_tomratt"] = bool(
+            row.get("upplatelseform") == "Tomträtt"
+            or row.get("brf_ager_marken") is False
+        )
         row["model_key"] = key
         row["model_mape_pct"] = round(model["metrics"]["mape_pct"], 1)
         row["stadsdel_resolved"] = resolved_sd

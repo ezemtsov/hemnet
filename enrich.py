@@ -19,9 +19,9 @@ treated as misses and re-fetched. Override with --cache-ttl-hours.
 each run) and the detail-page (potentially cached), the fresh list-page value
 wins if it's non-null. This matters most for `asking_price_kr` on on-sale.
 """
-import argparse, json, os, queue, threading, time, re, hashlib
+import argparse, json, os, time, re, hashlib
 from pathlib import Path
-from cdp import CDP, find_tab
+from cdp import CDP
 
 CACHE_ROOT = Path(__file__).parent / "cache" / "details"
 DEFAULT_CACHE_TTL_H = {"sold": None, "onsale": 18, "kommande": 18}
@@ -412,15 +412,6 @@ def cache_is_fresh(path: Path, ttl_hours: float | None) -> bool:
     return age_s < ttl_hours * 3600
 
 
-def _cdp_ports() -> list[int]:
-    """Read pool size from env. HEMNET_CDP_PORTS (comma-sep) takes precedence;
-    otherwise the single HEMNET_CDP_PORT (or its default 9222) is used."""
-    raw = os.environ.get("HEMNET_CDP_PORTS")
-    if raw:
-        return [int(p) for p in raw.split(",") if p.strip()]
-    return [int(os.environ.get("HEMNET_CDP_PORT", "9222"))]
-
-
 def _process_row(cdp: CDP, row: dict, cache_dir: Path, kind: str, ttl_h: float | None,
                  delay_s: float) -> tuple[dict, str]:
     """Cache-or-fetch one listing. Returns (merged_row, status) where status is
@@ -473,39 +464,37 @@ def enrich(in_path_str: str, out_path_str: str | None = None, *,
     cache_dir.mkdir(parents=True, exist_ok=True)
 
     ttl_h = cache_ttl_hours if cache_ttl_hours is not None else DEFAULT_CACHE_TTL_H.get(kind)
-    ports = _cdp_ports()
+    from pool import cdp_ports as _pool_cdp_ports, run_parallel
+    ports = _pool_cdp_ports()
     n = len(rows)
 
-    work_q: queue.Queue = queue.Queue()
     results: list[dict | None] = [None] * n
     counter = {"hits": 0, "stale_refetched": 0, "fetched_new": 0, "failed": 0, "done": 0}
-    lock = threading.Lock()
 
-    def worker(port: int):
-        cdp = CDP(find_tab("hemnet.se", f"http://localhost:{port}"))
-        while (item := work_q.get()) is not None:
-            idx, row = item
-            try:
-                merged, status = _process_row(cdp, row, cache_dir, kind, ttl_h, delay_s)
-            except Exception as e:
-                merged, status = merge_row_with_facts(row, {}), "failed"
-                with lock:
-                    print(f"[err] {row.get('href')!r}: {e}", flush=True)
-            with lock:
-                results[idx] = merged
-                counter[status] += 1
-                counter["done"] += 1
-                if counter["done"] % 50 == 0 or counter["done"] <= 3:
-                    print(f"[{counter['done']}/{n}] hits={counter['hits']} "
-                          f"stale_refetched={counter['stale_refetched']} "
-                          f"fetched_new={counter['fetched_new']} "
-                          f"failed={counter['failed']}", flush=True)
+    def process(cdp, task):
+        idx, row = task
+        try:
+            merged, status = _process_row(cdp, row, cache_dir, kind, ttl_h, delay_s)
+        except Exception as e:
+            print(f"[err] {row.get('href')!r}: {e}", flush=True)
+            merged, status = merge_row_with_facts(row, {}), "failed"
+        return idx, merged, status
 
-    threads = [threading.Thread(target=worker, args=(p,), daemon=True) for p in ports]
-    for t in threads: t.start()
-    for i, row in enumerate(rows): work_q.put((i, row))
-    for _ in ports: work_q.put(None)  # one sentinel per worker
-    for t in threads: t.join()
+    def on_result(_, result):
+        idx, merged, status = result
+        results[idx] = merged
+        counter[status] += 1
+        counter["done"] += 1
+        if counter["done"] % 50 == 0 or counter["done"] <= 3:
+            print(f"[{counter['done']}/{n}] hits={counter['hits']} "
+                  f"stale_refetched={counter['stale_refetched']} "
+                  f"fetched_new={counter['fetched_new']} "
+                  f"failed={counter['failed']}", flush=True)
+
+    # delay_s is handled inside _process_row (only sleeps after fetches);
+    # the pool's own per-task sleep stays at 0 so cache hits drain at full speed.
+    run_parallel([(i, row) for i, row in enumerate(rows)], ports, process,
+                 on_result=on_result, label="enrich", log_every=0, delay_s=0.0)
 
     with open(out_path, "w") as f:
         for r in results:

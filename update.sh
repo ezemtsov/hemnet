@@ -136,7 +136,7 @@ python3 score.py --sold "${SOLD}" --onsale "${LIVE_GEO}"
 LIVE_SCORED="data/live-${DATE}.enriched.geo.scored.jsonl"
 echo
 echo "▸ history (track outcomes across days)"
-HEMNET_CDP_PORT="${CDP_PORT}" python3 history.py update --live "${LIVE_SCORED}"
+HEMNET_CDP_PORTS="${CDP_PORTS}" python3 history.py update --live "${LIVE_SCORED}"
 
 echo
 echo "▸ build map"

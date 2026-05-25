@@ -34,10 +34,10 @@ Env:
   HEMNET_CDP_PORT (default 9223) — uses a single Chromium tab. Allabrf serves
   recaptcha v3 silently; one polite worker (≥0.5s between fetches) avoids it.
 """
-import argparse, glob, gzip, json, os, queue, re, threading, time, urllib.request
+import argparse, glob, gzip, json, re, time, urllib.request
 from pathlib import Path
 
-from cdp import CDP, find_tab
+from pool import cdp_ports, run_parallel
 
 ROOT = Path(__file__).parent
 CACHE_DIR = ROOT / "cache" / "details" / "allabrf"
@@ -121,61 +121,6 @@ def _wait_for(predicate, timeout_s: float = 15.0, poll_s: float = 0.3) -> bool:
     return False
 
 
-def _cdp_ports() -> list[int]:
-    """Match enrich.py's convention. HEMNET_CDP_PORTS (comma-sep) takes
-    precedence; otherwise fall back to the single HEMNET_CDP_PORT default."""
-    raw = os.environ.get("HEMNET_CDP_PORTS")
-    if raw:
-        return [int(p) for p in raw.split(",") if p.strip()]
-    return [int(os.environ.get("HEMNET_CDP_PORT", "9223"))]
-
-
-def run_parallel(tasks: list, ports: list[int], fn, label: str,
-                 on_result, delay_s: float, log_every: int = 25):
-    """Run `fn(cdp, task) -> result` over `tasks` using one worker per CDP
-    port. `on_result(task, result)` is called under a lock so it can mutate
-    shared state safely.
-
-    Each worker grabs a tab on its port, then loops the queue until drained.
-    A short `delay_s` between requests per worker keeps allabrf happy."""
-    q: queue.Queue = queue.Queue()
-    for t in tasks:
-        q.put(t)
-    counter = {"done": 0, "n": len(tasks)}
-    lock = threading.Lock()
-
-    def worker(port: int):
-        try:
-            cdp = CDP(find_tab("allabrf", f"http://localhost:{port}"))
-        except Exception:
-            # Tab is currently elsewhere (e.g. hemnet); grab any tab on this
-            # port and steer it to allabrf so future navigations stay there.
-            cdp = CDP(find_tab("://", f"http://localhost:{port}"))
-            cdp.navigate("https://www.allabrf.se/")
-            time.sleep(0.5)
-        while True:
-            try:
-                task = q.get_nowait()
-            except queue.Empty:
-                return
-            try:
-                result = fn(cdp, task)
-            except Exception as e:
-                with lock:
-                    print(f"  [{label} err] {task}: {e}", flush=True)
-                result = None
-            with lock:
-                on_result(task, result)
-                counter["done"] += 1
-                if counter["done"] % log_every == 0 or counter["done"] <= 3:
-                    print(f"  [{label} {counter['done']}/{counter['n']}] {task} → {result}", flush=True)
-            time.sleep(delay_s)
-
-    threads = [threading.Thread(target=worker, args=(p,), daemon=True) for p in ports]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
 
 
 _ORG_RE = re.compile(r"\borganisationsnummer\s*[:\-]?\s*(\d{6}-\d{4})", re.I)
@@ -300,21 +245,22 @@ def main():
 
     # ---- 3. address → brf slug (cached on disk so reruns are cheap) ----
     addr_to_brf = json.loads(ADDR_TO_ORG_PATH.read_text()) if ADDR_TO_ORG_PATH.exists() else {}
-    ports = _cdp_ports()
+    ports = cdp_ports()
     print(f"  using {len(ports)} Chromium worker(s) on ports {ports}")
 
     todo_addrs = [s for s in sorted(in_sitemap) if args.force or s not in addr_to_brf]
     print(f"  {len(todo_addrs)} addresses to resolve")
 
-    flush_lock = threading.Lock()
     def on_addr(slug, res):
         addr_to_brf[slug] = res
-        # Persist every result so a kill mid-run is recoverable.
-        with flush_lock:
-            ADDR_TO_ORG_PATH.write_text(json.dumps(addr_to_brf, ensure_ascii=False, indent=2))
+        # Persist every result so a kill mid-run is recoverable. pool's lock
+        # already serializes this callback, no extra lock needed.
+        ADDR_TO_ORG_PATH.write_text(json.dumps(addr_to_brf, ensure_ascii=False, indent=2))
 
     if todo_addrs:
-        run_parallel(todo_addrs, ports, resolve_addr_to_brf, "addr", on_addr, args.delay_s)
+        run_parallel(todo_addrs, ports, resolve_addr_to_brf,
+                     tab_substring="allabrf", on_result=on_addr,
+                     label="addr", delay_s=args.delay_s, log_result=True)
 
     resolved_n = sum(1 for v in addr_to_brf.values() if v)
     print(f"  resolved {resolved_n}/{len(addr_to_brf)} addresses to a BRF slug")
@@ -330,7 +276,9 @@ def main():
             (BY_ORG_DIR / f"{brf_slug}.json").write_text(json.dumps(facts, ensure_ascii=False, indent=2))
 
     if todo_brfs:
-        run_parallel(todo_brfs, ports, fetch_brf_summering, "brf", on_brf, args.delay_s, log_every=10)
+        run_parallel(todo_brfs, ports, fetch_brf_summering,
+                     tab_substring="allabrf", on_result=on_brf,
+                     label="brf", delay_s=args.delay_s, log_every=10, log_result=True)
 
     # ---- 5. summary ----
     done = sum(1 for _ in BY_ORG_DIR.glob("*.json"))

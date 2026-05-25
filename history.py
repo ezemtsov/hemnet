@@ -246,14 +246,16 @@ def update_one(live_path: Path, when: str, *, resolve: bool) -> dict:
     vanished = [r for r in history.values() if r.get("status") == "vanished"]
 
     if resolve and vanished:
-        print(f"resolving {len(vanished)} vanished via CDP …", flush=True)
+        from pool import cdp_ports, run_parallel
+        ports = cdp_ports()
+        print(f"resolving {len(vanished)} vanished via CDP "
+              f"(pool={len(ports)} on ports {ports}) …", flush=True)
         try:
-            cdp = _cdp_session()
-            for i, r in enumerate(vanished, 1):
-                resolve_vanished(cdp, r, today)
-                if i % 25 == 0:
-                    print(f"  {i}/{len(vanished)} probed", flush=True)
-                time.sleep(0.8)
+            run_parallel(vanished, ports,
+                         lambda cdp, rec: resolve_vanished(cdp, rec, today),
+                         label="resolve",
+                         log_every=25,
+                         delay_s=0.4)
         except Exception as e:
             print(f"[resolve setup err] {e}; skipping resolution this run", flush=True)
 

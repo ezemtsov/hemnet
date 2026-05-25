@@ -186,6 +186,12 @@ HTML_TEMPLATE = r"""<!doctype html>
   li.row .addr { font-weight: 600; font-size: 13px; margin-top: 2px;
                  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   li.row .star { color: #e0a012; margin-right: 4px; cursor: help; }
+  /* Liked indicator — distinct brighter gold so it doesn't read as the
+     liquidity star. Always present in DOM; visibility flipped via .liked
+     on the row so toggling is a one-line classList op. */
+  li.row .liked-star { color: #f59e0b; margin-right: 4px; font-weight: 700;
+                       display: none; }
+  li.row.liked .liked-star { display: inline; }
   li.row .ptype { color: #777; margin-right: 5px; vertical-align: -2px; cursor: help; }
   li.row .area { font-size: 11px; color: #888; }
   li.row .meta { font-size: 11px; color: #555; margin-top: 3px; }
@@ -207,6 +213,19 @@ HTML_TEMPLATE = r"""<!doctype html>
   .popup-footer { font-size: 11px; color: #666; margin-top: 4px; display: flex; justify-content: space-between; align-items: center; }
   .popup-link { font-size: 11px; color: #2a6df4; text-decoration: none; }
   .popup-link:hover { text-decoration: underline; }
+  /* Favorite (star) button — pinned to the top-right of the popup so it's
+     reachable without scrolling and doesn't interfere with the photo. */
+  .like-btn {
+    position: absolute; top: 6px; right: 6px;
+    width: 28px; height: 28px; padding: 0;
+    border: 1px solid #ccc; border-radius: 50%;
+    background: rgba(255,255,255,0.9); color: #888;
+    font-size: 18px; line-height: 26px; text-align: center;
+    cursor: pointer; z-index: 2;
+    transition: color .12s, transform .12s, border-color .12s;
+  }
+  .like-btn:hover { color: #f59e0b; transform: scale(1.08); }
+  .like-btn.liked { color: #f59e0b; border-color: #f59e0b; }
   .deal-na   { background: #eee;    color: #777; }
 </style>
 </head>
@@ -256,6 +275,23 @@ HTML_TEMPLATE = r"""<!doctype html>
         integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
 <script>
 const LISTINGS = __DATA__;
+
+// Per-user state, persisted in localStorage. `seen` is auto-tracked on
+// popup open; `liked` is toggled by the star button in each popup.
+// Keyed by listing href (unique per Hemnet ad). v1 suffix lets us bump
+// the schema without colliding with old entries.
+const STORE_SEEN  = 'hemnet:seen:v1';
+const STORE_LIKED = 'hemnet:liked:v1';
+function loadStore(key) {
+  try { return new Set(JSON.parse(localStorage.getItem(key) || '[]')); }
+  catch (_e) { return new Set(); }
+}
+function saveStore(key, set) {
+  try { localStorage.setItem(key, JSON.stringify([...set])); }
+  catch (_e) { /* quota / disabled — silently no-op */ }
+}
+const seenSet  = loadStore(STORE_SEEN);
+const likedSet = loadStore(STORE_LIKED);
 
 const map = L.map('map', { zoomSnap: 0.5 }).setView([59.330, 18.067], 13);
 // Esri ArcGIS — one of the few tile providers that serve file:// origins
@@ -408,6 +444,10 @@ function brfStat(value, kind, label, unit, thresholdTip) {
 function popupHtml(d) {
   const photo = (d.photos && d.photos[0])
     ? `<img class="popup-photo" src="${d.photos[0]}" loading="lazy" alt="">` : '';
+  // Liked-state visual is set in the popupopen handler — bindPopup caches
+  // the rendered HTML so we sync the icon/class there to reflect whatever
+  // the user's latest toggle was.
+  const likeBtn = `<button class="like-btn" type="button" title="Spara favorit" aria-label="Spara favorit">☆</button>`;
   const vaning = d.vaning != null
     ? `${d.vaning}${d.vaning_total ? ' av ' + d.vaning_total : ''}${d.hiss ? ', hiss' : ''}`
     : '–';
@@ -448,6 +488,7 @@ function popupHtml(d) {
       ${brfStats ? `<div class="popup-brf-stats">${brfStats}</div>` : ''}
     </div>` : '';
   return `
+    ${likeBtn}
     ${photo}
     <div class="popup-section">
       <div class="popup-title">${d.address ?? ''}</div>
@@ -544,9 +585,10 @@ sorted.forEach((d, i) => {
   const ptypeIcon = ptypeSvg
     ? `<span class="ptype" title="${d.bostadstyp}">${ptypeSvg}</span>` : '';
   if (isWithdrawn) li.style.opacity = '0.55';
+  if (likedSet.has(d.href)) li.classList.add('liked');
   li.innerHTML = `
     <div class="top">${dealLabel}<span class="price">${fmtKr(priceShown)}</span></div>
-    <div class="addr">${ptypeIcon}${star}${d.address ?? ''}</div>
+    <div class="addr"><span class="liked-star" title="Sparad favorit">★</span>${ptypeIcon}${star}${d.address ?? ''}</div>
     <div class="area">${d.area ?? ''}</div>
     <div class="meta">${fmtM2(d.m2)} · ${d.rooms ?? '–'} rum · ${fmtKr(d.kr_per_m2)}/m² ${vaning ? '· ' + vaning : ''}${
       d.min_to_odenplan != null ? ` · <span style="color:${commuteColor(d.min_to_odenplan)}">${d.min_to_odenplan} min</span>` : ''
@@ -566,35 +608,77 @@ sorted.forEach((d, i) => {
 // rendered as a colored ring on a pale fill so they read as "outcome" not
 // "opportunity". Withdrawn pins are faded gray with a dashed ring.
 function pinStyle(d) {
+  let s;
   if (d.status === 'sold') {
     const r = d.realized_deal_pct;
-    return {
+    s = {
       radius: 8, weight: 2.5,
       color: r != null ? dealColor(r) : '#888',
       fillColor: '#e9e9e9', fillOpacity: 0.9
     };
-  }
-  if (d.status === 'withdrawn') {
-    return {
+  } else if (d.status === 'withdrawn') {
+    s = {
       radius: 7, weight: 1.5,
       color: '#888', dashArray: '3,3',
       fillColor: '#bbb', fillOpacity: 0.45
     };
+  } else {
+    s = {
+      radius: 9, weight: 2,
+      color: d.status === 'kommande' ? '#222' : 'white',
+      fillColor: dealColor(d.deal_pct), fillOpacity: 0.95
+    };
   }
-  return {
-    radius: 9, weight: 2,
-    color: d.status === 'kommande' ? '#222' : 'white',
-    fillColor: dealColor(d.deal_pct), fillOpacity: 0.95
-  };
+  // Liked overrides the border with gold so the marker pops without
+  // hiding the deal-color fill. Seen-but-not-liked is faded so the eye
+  // is drawn to unreviewed listings.
+  if (likedSet.has(d.href)) {
+    s.color = '#f59e0b';
+    s.weight = Math.max(s.weight, 3);
+  } else if (seenSet.has(d.href)) {
+    s.fillOpacity = s.fillOpacity * 0.4;
+  }
+  return s;
 }
 
 // Pass 2: build markers in REVERSE order (worst deals first, best on top).
+function syncLikeButton(btn, href) {
+  const liked = likedSet.has(href);
+  btn.classList.toggle('liked', liked);
+  btn.textContent = liked ? '★' : '☆';
+}
+
 for (let i = sorted.length - 1; i >= 0; i--) {
   const d = sorted[i];
   if (d.lat == null || d.lon == null) continue;
   const m = L.circleMarker([d.lat, d.lon], pinStyle(d)).addTo(map);
   m.bindPopup(popupHtml(d), { maxWidth: 280, autoPan: false });
-  m.on('popupopen', () => selectIndex(i, { fromMap: true }));
+  m.on('popupopen', (e) => {
+    selectIndex(i, { fromMap: true });
+    // Mark as seen the first time the popup opens; restyle the marker so
+    // the fade is immediate (no reload needed).
+    if (!seenSet.has(d.href)) {
+      seenSet.add(d.href);
+      saveStore(STORE_SEEN, seenSet);
+      m.setStyle(pinStyle(d));
+    }
+    // Wire the star button. bindPopup caches the HTML, so we re-sync the
+    // icon state on every open and (re)attach the click handler.
+    const popupEl = e.popup.getElement();
+    const btn = popupEl && popupEl.querySelector('.like-btn');
+    if (!btn) return;
+    syncLikeButton(btn, d.href);
+    btn.onclick = (ev) => {
+      ev.stopPropagation();
+      if (likedSet.has(d.href)) likedSet.delete(d.href);
+      else likedSet.add(d.href);
+      saveStore(STORE_LIKED, likedSet);
+      syncLikeButton(btn, d.href);
+      m.setStyle(pinStyle(d));
+      const row = rows[i];
+      if (row) row.classList.toggle('liked', likedSet.has(d.href));
+    };
+  });
   markers[i] = m;
 }
 

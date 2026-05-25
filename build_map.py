@@ -18,7 +18,7 @@ ROOT = Path(__file__).parent
 POPUP_FIELDS = (
     "href address area asking_price_kr m2 rooms kr_per_m2 byggar vaning vaning_total "
     "hiss forening photos lat lon visning predicted_price_kr deal_pct stadsdel_liquidity "
-    "bostadstyp status min_to_odenplan published_at region "
+    "bostadstyp status min_to_odenplan published_at region tags "
     "brf_akta brf_n_lgh brf_arsavgift_kr_m2 brf_belaning_kr_m2 "
     "sold_price_kr sold_date sold_url realized_deal_pct first_seen last_seen "
     "asking_history"
@@ -77,6 +77,7 @@ def _ghost_from_history(rec: dict) -> dict | None:
         "vaning":             rec.get("vaning"),
         "vaning_total":       rec.get("vaning_total"),
         "hiss":               rec.get("hiss"),
+        "tags":               rec.get("tags"),
         "forening":           rec.get("forening"),
         "predicted_price_kr": pred,
         "deal_pct":           rec.get("deal_pct_last"),
@@ -168,6 +169,11 @@ HTML_TEMPLATE = r"""<!doctype html>
   }
   .filter-btn:hover { background: #f3f3f3; }
   .filter-btn.active { background: #2a6df4; color: #fff; border-color: #2a6df4; }
+  /* Per-group accent — keeps it obvious which row each button belongs to
+     as the filter set grows. Type stays on the default blue. */
+  .fg-status  .filter-btn.active { background: #1f9930; border-color: #1f9930; }
+  .fg-region  .filter-btn.active { background: #7c3aed; border-color: #7c3aed; }
+  .fg-feature .filter-btn.active { background: #d97706; border-color: #d97706; }
   .filter-btn .count { opacity: 0.7; }
   ul#list { list-style: none; padding: 0; margin: 0; }
   li.row { padding: 10px 14px; border-bottom: 1px solid #eee; cursor: pointer; transition: background .12s; }
@@ -625,24 +631,36 @@ const REGION_FILTERS = [
 ];
 const selectedRegions = new Set(REGION_FILTERS.map(r => r.key));
 
+// Feature filter — Hemnet checkbox-tagged amenities from the list page
+// (currently Balkong / Hiss / Uteplats; we only surface the ones that
+// actually act as a search criterion). Off by default: clicking switches
+// to "only show listings that have this tag."
+const FEATURE_FILTERS = [
+  { key: 'Uteplats', label: 'Uteplats' },
+];
+const selectedFeatures = new Set();
+
 // Pre-compute counts.
-const groupCounts = {}, statusCounts = {}, regionCounts = {};
+const groupCounts = {}, statusCounts = {}, regionCounts = {}, featureCounts = {};
 sorted.forEach(d => {
   const g = groupOf.get(d.bostadstyp);
   if (g) groupCounts[g] = (groupCounts[g] || 0) + 1;
   const s = d.status || 'onsale';
   statusCounts[s] = (statusCounts[s] || 0) + 1;
   if (d.region) regionCounts[d.region] = (regionCounts[d.region] || 0) + 1;
+  (d.tags || []).forEach(t => { featureCounts[t] = (featureCounts[t] || 0) + 1; });
 });
 
 // Render two filter rows: property type (with icons) and status (text-only).
 const filtersEl = document.getElementById('filters');
-const typeRow   = document.createElement('div'); typeRow.className   = 'filter-group';
-const statusRow = document.createElement('div'); statusRow.className = 'filter-group';
-const regionRow = document.createElement('div'); regionRow.className = 'filter-group';
+const typeRow    = document.createElement('div'); typeRow.className    = 'filter-group fg-type';
+const statusRow  = document.createElement('div'); statusRow.className  = 'filter-group fg-status';
+const regionRow  = document.createElement('div'); regionRow.className  = 'filter-group fg-region';
+const featureRow = document.createElement('div'); featureRow.className = 'filter-group fg-feature';
 filtersEl.appendChild(typeRow);
 filtersEl.appendChild(statusRow);
 filtersEl.appendChild(regionRow);
+filtersEl.appendChild(featureRow);
 
 function makeFilterButton(label, count, selectedSet, key, iconHtml) {
   const btn = document.createElement('button');
@@ -681,6 +699,10 @@ REGION_FILTERS.forEach(r => {
   if (!regionCounts[r.key]) return;
   regionRow.appendChild(makeFilterButton(r.label, regionCounts[r.key], selectedRegions, r.key));
 });
+FEATURE_FILTERS.forEach(f => {
+  if (!featureCounts[f.key]) return;
+  featureRow.appendChild(makeFilterButton(f.label, featureCounts[f.key], selectedFeatures, f.key));
+});
 
 function passesTypeFilter(d) {
   const g = groupOf.get(d.bostadstyp);
@@ -694,6 +716,15 @@ function passesRegionFilter(d) {
   // Rows without a region tag (rare; older history records pre-region) pass through.
   return !d.region || selectedRegions.has(d.region);
 }
+function passesFeatureFilter(d) {
+  // Empty selection = no feature filter applied (everything passes). Otherwise
+  // the row must have every selected tag (AND, not OR — multiple amenities
+  // typically combine as "I want all of these").
+  if (selectedFeatures.size === 0) return true;
+  const tags = d.tags || [];
+  for (const f of selectedFeatures) if (!tags.includes(f)) return false;
+  return true;
+}
 
 // Hide sidebar rows that fall outside the current map viewport or don't
 // match the selected property-type filters. Map markers reflect only the
@@ -703,7 +734,7 @@ function updateVisibility() {
   let visible = 0;
   for (let i = 0; i < sorted.length; i++) {
     const d = sorted[i], row = rows[i], marker = markers[i];
-    const filterOk = passesTypeFilter(d) && passesStatusFilter(d) && passesRegionFilter(d);
+    const filterOk = passesTypeFilter(d) && passesStatusFilter(d) && passesRegionFilter(d) && passesFeatureFilter(d);
     if (marker) {
       const onMap = map.hasLayer(marker);
       if (filterOk && !onMap) marker.addTo(map);

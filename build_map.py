@@ -309,7 +309,22 @@ function saveStore(key, set) {
 const seenSet  = loadStore(STORE_SEEN);
 const likedSet = loadStore(STORE_LIKED);
 
-const map = L.map('map', { zoomSnap: 0.5 }).setView([59.330, 18.067], 13);
+// Restore the user's last map position/zoom so reloads land where they
+// left off instead of always re-centering on Stockholm. Saved on every
+// moveend below.
+const STORE_MAP = 'hemnet:map:v1';
+function loadMapState() {
+  try {
+    const v = JSON.parse(localStorage.getItem(STORE_MAP) || 'null');
+    if (v && Number.isFinite(v.lat) && Number.isFinite(v.lon) && Number.isFinite(v.zoom)) return v;
+  } catch (_e) {}
+  return null;
+}
+const _savedMap = loadMapState();
+const map = L.map('map', { zoomSnap: 0.5 }).setView(
+  _savedMap ? [_savedMap.lat, _savedMap.lon] : [59.330, 18.067],
+  _savedMap ? _savedMap.zoom : 13,
+);
 // Esri ArcGIS — one of the few tile providers that serve file:// origins
 // without a Referer. If you see a blank map, run `python3 -m http.server`
 // in the project root and open http://localhost:8000/ instead.
@@ -891,7 +906,15 @@ function updateVisibility() {
   }
   subEl.textContent = `${visible} of ${sorted.length} in view · ${pinned} pinned · sorted by newest`;
 }
-map.on('moveend', updateVisibility);
+map.on('moveend', () => {
+  updateVisibility();
+  const c = map.getCenter();
+  try {
+    localStorage.setItem(STORE_MAP, JSON.stringify({
+      lat: +c.lat.toFixed(5), lon: +c.lng.toFixed(5), zoom: map.getZoom(),
+    }));
+  } catch (_e) {}
+});
 updateVisibility();
 
 document.title = `Hemnet — ${sorted.length} onsale`;

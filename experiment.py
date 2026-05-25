@@ -16,8 +16,12 @@ import numpy as np
 import score
 
 
-BASELINE_NUM = ["log_m2", "byggar_decade", "vaning_eff", "hiss_int", "log_avgift"]
-OWNERSHIP_NUM = BASELINE_NUM + ["is_house", "is_tomratt", "is_aganderatt", "is_andel"]
+BASELINE_NUM  = ["log_m2", "byggar_decade", "vaning_eff", "hiss_int", "log_avgift"]
+OWNERSHIP_NUM = BASELINE_NUM  + ["is_house", "is_tomratt", "is_aganderatt", "is_andel"]
+# BRF-aware features rely on brf_join.py having backfilled brf_belaning / brf_akta
+# onto the sold dataset. Without that, log_belaning falls back to medians and
+# is_oakta is always zero — adding zero variance gains nothing.
+BRF_NUM       = OWNERSHIP_NUM + ["is_oakta", "log_belaning"]
 
 
 def featurize_set(sold_rows, *, stadsdel_fn, apartments_only):
@@ -98,13 +102,15 @@ def main():
     print(f"Loaded {len(sold_rows)} sold rows from {args.sold}\n")
 
     configs = [
-        # label,                       encoder,                      apt_only, numeric,       fold_fine
+        # label,                            encoder,                  apt_only, numeric,       fold_fine
         ("A  coarse, no ownership, all",     score.normalize_stadsdel, False, BASELINE_NUM,   False),
         ("B  coarse, +ownership, all",       score.normalize_stadsdel, False, OWNERSHIP_NUM,  False),
         ("C  fine,   +ownership, all",       score.stadsdel_fine,      False, OWNERSHIP_NUM,  True),
         ("D  coarse, no ownership, apt-only",score.normalize_stadsdel, True,  BASELINE_NUM,   False),
         ("E  coarse, +ownership, apt-only",  score.normalize_stadsdel, True,  OWNERSHIP_NUM,  False),
         ("F  fine,   +ownership, apt-only",  score.stadsdel_fine,      True,  OWNERSHIP_NUM,  True),
+        ("I  coarse, +ownership+BRF, apt",   score.normalize_stadsdel, True,  BRF_NUM,        False),
+        ("J  fine,   +ownership+BRF, apt",   score.stadsdel_fine,      True,  BRF_NUM,        True),
     ]
     print(f"{'config':42s}  {'n':>5s}  {'buckets':>7s}  {'MAPE':>6s}  {'median':>6s}  {'p90':>6s}")
     print("-" * 100)
@@ -119,6 +125,12 @@ def main():
     run_split_config("H  split, coarse, +own, apt-only",
                      sold_rows, stadsdel_fn=score.normalize_stadsdel, apartments_only=True,
                      numeric_features=OWNERSHIP_NUM, fold_fine_to_coarse=False, seed=args.seed)
+    run_split_config("K  split, fine, +own+BRF, apt",
+                     sold_rows, stadsdel_fn=score.stadsdel_fine, apartments_only=True,
+                     numeric_features=BRF_NUM, fold_fine_to_coarse=True, seed=args.seed)
+    run_split_config("L  split, coarse, +own+BRF, apt",
+                     sold_rows, stadsdel_fn=score.normalize_stadsdel, apartments_only=True,
+                     numeric_features=BRF_NUM, fold_fine_to_coarse=False, seed=args.seed)
 
 
 if __name__ == "__main__":

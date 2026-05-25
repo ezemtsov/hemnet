@@ -153,6 +153,8 @@ def featurize(row: dict, stadsdel_medians: dict | None = None,
     vaning = row.get("vaning")
     avgift = row.get("avgift_kr_mon") or row.get("fee_kr")
     hiss = row.get("hiss")
+    belaning = row.get("brf_belaning_kr_m2")
+    is_oakta = 1 if row.get("brf_akta") is False else 0
 
     # Houses on Äganderätt genuinely have no monthly fee — don't impute one.
     avgift_truly_none = (avgift is None and is_aganderatt)
@@ -164,6 +166,8 @@ def featurize(row: dict, stadsdel_medians: dict | None = None,
         hiss = hiss if hiss is not None else s.get("hiss", False)
         if avgift is None and not avgift_truly_none:
             avgift = s.get("avgift")
+        if belaning is None:
+            belaning = s.get("belaning")
 
     return {
         "stadsdel": stadsdel,
@@ -172,8 +176,10 @@ def featurize(row: dict, stadsdel_medians: dict | None = None,
         "vaning_eff": int(vaning) if vaning is not None else None,
         "hiss_int": 1 if hiss else 0,
         "log_avgift": math.log(float(avgift) + 1) if avgift else (0.0 if avgift_truly_none else None),
+        "log_belaning": math.log(float(belaning) + 1) if belaning is not None else None,
         "is_house": is_house,
         "is_tomratt": is_tomratt,
+        "is_oakta": is_oakta,
         "is_aganderatt": is_aganderatt,
         "is_andel": is_andel,
     }
@@ -237,32 +243,35 @@ def compute_liquidity_tiers(sold_rows: list[dict]) -> dict[str, str]:
 
 
 def compute_medians(rows: list[dict]) -> dict:
-    """Per-stadsdel medians for byggar/vaning/avgift/hiss + a global fallback."""
+    """Per-stadsdel medians for byggar/vaning/avgift/hiss/belaning + a global fallback."""
     by_stadsdel: dict = {}
     for r in rows:
         s = r["stadsdel"]
-        by_stadsdel.setdefault(s, {"byggar": [], "vaning": [], "avgift": [], "hiss": []})
+        by_stadsdel.setdefault(s, {"byggar": [], "vaning": [], "avgift": [], "hiss": [], "belaning": []})
         if r["byggar_decade"] is not None: by_stadsdel[s]["byggar"].append(r["byggar_decade"])
         if r["vaning_eff"] is not None:    by_stadsdel[s]["vaning"].append(r["vaning_eff"])
         if r["log_avgift"] is not None:    by_stadsdel[s]["avgift"].append(math.exp(r["log_avgift"]) - 1)
+        if r["log_belaning"] is not None:  by_stadsdel[s]["belaning"].append(math.exp(r["log_belaning"]) - 1)
         by_stadsdel[s]["hiss"].append(r["hiss_int"])
 
     out: dict = {}
     for s, d in by_stadsdel.items():
         out[s] = {
-            "byggar": int(np.median(d["byggar"])) if d["byggar"] else None,
-            "vaning": int(np.median(d["vaning"])) if d["vaning"] else None,
-            "avgift": float(np.median(d["avgift"])) if d["avgift"] else None,
-            "hiss":   bool(np.mean(d["hiss"]) > 0.5),
+            "byggar":   int(np.median(d["byggar"])) if d["byggar"] else None,
+            "vaning":   int(np.median(d["vaning"])) if d["vaning"] else None,
+            "avgift":   float(np.median(d["avgift"])) if d["avgift"] else None,
+            "belaning": float(np.median(d["belaning"])) if d["belaning"] else None,
+            "hiss":     bool(np.mean(d["hiss"]) > 0.5),
         }
-    flat = {"byggar": [], "vaning": [], "avgift": [], "hiss": []}
+    flat = {"byggar": [], "vaning": [], "avgift": [], "hiss": [], "belaning": []}
     for d in by_stadsdel.values():
         for k in flat: flat[k].extend(d[k])
     out["__global__"] = {
-        "byggar": int(np.median(flat["byggar"])) if flat["byggar"] else None,
-        "vaning": int(np.median(flat["vaning"])) if flat["vaning"] else None,
-        "avgift": float(np.median(flat["avgift"])) if flat["avgift"] else None,
-        "hiss":   bool(np.mean(flat["hiss"]) > 0.5),
+        "byggar":   int(np.median(flat["byggar"])) if flat["byggar"] else None,
+        "vaning":   int(np.median(flat["vaning"])) if flat["vaning"] else None,
+        "avgift":   float(np.median(flat["avgift"])) if flat["avgift"] else None,
+        "belaning": float(np.median(flat["belaning"])) if flat["belaning"] else None,
+        "hiss":     bool(np.mean(flat["hiss"]) > 0.5),
     }
     return out
 
@@ -284,6 +293,7 @@ def build_design_matrix(feature_rows: list[dict], stadsdel_levels: list[str], me
     fb_byggar = fallback.get("byggar") or 1970
     fb_vaning = fallback.get("vaning") or 2
     fb_avgift = fallback.get("avgift") or 4500
+    fb_belaning = fallback.get("belaning") or 5000
     for i, r in enumerate(feature_rows):
         s = medians.get(r["stadsdel"]) or fallback
         bd = r["byggar_decade"] if r["byggar_decade"] is not None else (s.get("byggar") or fb_byggar)
@@ -291,14 +301,19 @@ def build_design_matrix(feature_rows: list[dict], stadsdel_levels: list[str], me
         # Use the row's log_avgift as-is when present (including the legitimate 0.0
         # for fee-less houses); only fall back to median when truly missing.
         la = r["log_avgift"] if r["log_avgift"] is not None else math.log((s.get("avgift") or fb_avgift) + 1)
+        lb = r.get("log_belaning")
+        if lb is None:
+            lb = math.log((s.get("belaning") or fb_belaning) + 1)
         feat_vals = {
             "log_m2": r["log_m2"],
             "byggar_decade": bd,
             "vaning_eff": ve,
             "hiss_int": r["hiss_int"],
             "log_avgift": la,
+            "log_belaning": lb,
             "is_house": r.get("is_house", 0),
             "is_tomratt": r.get("is_tomratt", 0),
+            "is_oakta": r.get("is_oakta", 0),
             "is_aganderatt": r.get("is_aganderatt", 0),
             "is_andel": r.get("is_andel", 0),
         }

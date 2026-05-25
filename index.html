@@ -105,6 +105,22 @@
   }
   .like-btn:hover { color: #f59e0b; transform: scale(1.08); }
   .like-btn.liked { color: #f59e0b; border-color: #f59e0b; }
+  /* "Seen" eye overlay — a Leaflet permanent tooltip rendered dead-center
+     over the marker. Strip Leaflet's default chrome and let pointer
+     events fall through to the marker beneath. */
+  .leaflet-tooltip.seen-marker {
+    background: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    font-size: 11px;
+    line-height: 1;
+    pointer-events: none;
+    white-space: nowrap;
+    text-shadow: 0 0 2px rgba(255,255,255,0.9);
+  }
+  .leaflet-tooltip.seen-marker::before { display: none !important; }
   .deal-na   { background: #eee;    color: #777; }
 </style>
 </head>
@@ -509,13 +525,11 @@ function pinStyle(d) {
     };
   }
   // Liked overrides the border with gold so the marker pops without
-  // hiding the deal-color fill. Seen-but-not-liked is faded so the eye
-  // is drawn to unreviewed listings.
+  // hiding the deal-color fill. Seen state is rendered separately as
+  // a transparent eye-emoji tooltip overlay (see ensureSeenOverlay).
   if (likedSet.has(d.href)) {
     s.color = '#f59e0b';
     s.weight = Math.max(s.weight, 3);
-  } else if (seenSet.has(d.href)) {
-    s.fillOpacity = s.fillOpacity * 0.4;
   }
   return s;
 }
@@ -527,36 +541,53 @@ function syncLikeButton(btn, href) {
   btn.textContent = liked ? '★' : '☆';
 }
 
+// Pin the eye emoji on the marker. Idempotent — calling twice is harmless.
+function ensureSeenOverlay(marker) {
+  if (marker._seenOverlay) return;
+  marker.bindTooltip('👁', {
+    permanent: true, direction: 'center',
+    className: 'seen-marker', offset: [0, 0],
+  }).openTooltip();
+  marker._seenOverlay = true;
+}
+
+function markSeen(href, marker) {
+  if (seenSet.has(href)) return;
+  seenSet.add(href);
+  saveStore(STORE_SEEN, seenSet);
+  if (marker) ensureSeenOverlay(marker);
+}
+
 for (let i = sorted.length - 1; i >= 0; i--) {
   const d = sorted[i];
   if (d.lat == null || d.lon == null) continue;
   const m = L.circleMarker([d.lat, d.lon], pinStyle(d)).addTo(map);
   m.bindPopup(popupHtml(d), { maxWidth: 280, autoPan: false });
+  if (seenSet.has(d.href)) ensureSeenOverlay(m);
   m.on('popupopen', (e) => {
     selectIndex(i, { fromMap: true });
-    // Mark as seen the first time the popup opens; restyle the marker so
-    // the fade is immediate (no reload needed).
-    if (!seenSet.has(d.href)) {
-      seenSet.add(d.href);
-      saveStore(STORE_SEEN, seenSet);
-      m.setStyle(pinStyle(d));
-    }
-    // Wire the star button. bindPopup caches the HTML, so we re-sync the
-    // icon state on every open and (re)attach the click handler.
+    // bindPopup caches HTML — re-sync the star icon and re-attach
+    // handlers on every open.
     const popupEl = e.popup.getElement();
-    const btn = popupEl && popupEl.querySelector('.like-btn');
-    if (!btn) return;
-    syncLikeButton(btn, d.href);
-    btn.onclick = (ev) => {
-      ev.stopPropagation();
-      if (likedSet.has(d.href)) likedSet.delete(d.href);
-      else likedSet.add(d.href);
-      saveStore(STORE_LIKED, likedSet);
+    if (!popupEl) return;
+    const btn = popupEl.querySelector('.like-btn');
+    if (btn) {
       syncLikeButton(btn, d.href);
-      m.setStyle(pinStyle(d));
-      const row = rows[i];
-      if (row) row.classList.toggle('liked', likedSet.has(d.href));
-    };
+      btn.onclick = (ev) => {
+        ev.stopPropagation();
+        if (likedSet.has(d.href)) likedSet.delete(d.href);
+        else likedSet.add(d.href);
+        saveStore(STORE_LIKED, likedSet);
+        syncLikeButton(btn, d.href);
+        m.setStyle(pinStyle(d));
+        const row = rows[i];
+        if (row) row.classList.toggle('liked', likedSet.has(d.href));
+      };
+    }
+    // Mark as seen only when the user actually opens the Hemnet link —
+    // skimming popups doesn't count as having reviewed the listing.
+    const link = popupEl.querySelector('.popup-link');
+    if (link) link.onclick = () => markSeen(d.href, m);
   });
   markers[i] = m;
 }

@@ -685,7 +685,7 @@ function ensureSeenOverlay(marker) {
   if (marker._seenOverlay) return;
   const r = (marker.options && marker.options.radius) || 9;
   const off = Math.round(r * 0.7);
-  marker.bindTooltip('👁', {
+  marker.bindTooltip('👀', {
     permanent: true, direction: 'center',
     className: 'seen-marker', offset: [off, off],
   }).openTooltip();

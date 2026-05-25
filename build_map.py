@@ -696,8 +696,6 @@ const TYPE_GROUPS = [
 ];
 const groupOf = new Map();   // bostadstyp -> group key
 TYPE_GROUPS.forEach(g => g.matches.forEach(t => groupOf.set(t, g.key)));
-// All groups active by default — clicking a button toggles its group off.
-const selectedGroups = new Set(TYPE_GROUPS.map(g => g.key));
 
 const STATUS_FILTERS = [
   { key: 'onsale',    label: 'Till salu', defaultOn: true  },
@@ -705,7 +703,6 @@ const STATUS_FILTERS = [
   { key: 'sold',      label: 'Sålda',     defaultOn: false },
   { key: 'withdrawn', label: 'Borttagna', defaultOn: false },
 ];
-const selectedStatuses = new Set(STATUS_FILTERS.filter(s => s.defaultOn).map(s => s.key));
 
 // Region filter — inner/outer split matches score.py's INOM_TULLARNA set
 // (carried on each row as `region` ∈ {inner, outer}).
@@ -713,7 +710,6 @@ const REGION_FILTERS = [
   { key: 'inner', label: 'Inom tullarna' },
   { key: 'outer', label: 'Utom tullarna' },
 ];
-const selectedRegions = new Set(REGION_FILTERS.map(r => r.key));
 
 // Feature filter — Hemnet checkbox-tagged amenities from the list page
 // (currently Balkong / Hiss / Uteplats; we only surface the ones that
@@ -722,7 +718,31 @@ const selectedRegions = new Set(REGION_FILTERS.map(r => r.key));
 const FEATURE_FILTERS = [
   { key: 'Uteplats', label: 'Uteplats' },
 ];
-const selectedFeatures = new Set();
+
+// Filter selection persists in localStorage so the user doesn't have to
+// re-pick after every refresh. Fall back to per-group defaults when
+// nothing is saved yet. Unknown keys in the saved blob (e.g. a feature
+// we removed) are harmless — they simply never get rendered as buttons.
+const STORE_FILTERS = 'hemnet:filters:v1';
+function loadFilters() {
+  try { return JSON.parse(localStorage.getItem(STORE_FILTERS) || 'null'); }
+  catch (_e) { return null; }
+}
+function saveFilters() {
+  try {
+    localStorage.setItem(STORE_FILTERS, JSON.stringify({
+      groups:   [...selectedGroups],
+      statuses: [...selectedStatuses],
+      regions:  [...selectedRegions],
+      features: [...selectedFeatures],
+    }));
+  } catch (_e) { /* quota / disabled — silently no-op */ }
+}
+const savedFilters = loadFilters();
+const selectedGroups   = new Set(savedFilters?.groups   ?? TYPE_GROUPS.map(g => g.key));
+const selectedStatuses = new Set(savedFilters?.statuses ?? STATUS_FILTERS.filter(s => s.defaultOn).map(s => s.key));
+const selectedRegions  = new Set(savedFilters?.regions  ?? REGION_FILTERS.map(r => r.key));
+const selectedFeatures = new Set(savedFilters?.features ?? []);
 
 // Pre-compute counts.
 const groupCounts = {}, statusCounts = {}, regionCounts = {}, featureCounts = {};
@@ -756,6 +776,7 @@ function makeFilterButton(label, count, selectedSet, key, iconHtml) {
     else selectedSet.add(key);
     btn.classList.toggle('active');
     updateVisibility();
+    saveFilters();
   });
   return btn;
 }
@@ -764,7 +785,7 @@ TYPE_GROUPS.forEach(g => {
   if (!groupCounts[g.key]) return;
   // Icon-only for property type (label suppressed) — keeps the row compact.
   const btn = document.createElement('button');
-  btn.className = 'filter-btn active';
+  btn.className = selectedGroups.has(g.key) ? 'filter-btn active' : 'filter-btn';
   btn.title = `Toggle ${g.label}`;
   btn.innerHTML = `${g.icon}<span class="count">${groupCounts[g.key]}</span>`;
   btn.addEventListener('click', () => {
@@ -772,6 +793,7 @@ TYPE_GROUPS.forEach(g => {
     else selectedGroups.add(g.key);
     btn.classList.toggle('active');
     updateVisibility();
+    saveFilters();
   });
   typeRow.appendChild(btn);
 });

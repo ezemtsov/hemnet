@@ -230,31 +230,16 @@ HTML_TEMPLATE = r"""<!doctype html>
   }
   .like-btn:hover { color: #f59e0b; transform: scale(1.08); }
   .like-btn.liked { color: #f59e0b; border-color: #f59e0b; }
-  /* "Seen" eye overlay — a Leaflet permanent tooltip positioned at the
-     bottom-right of the marker (offset set per-marker in JS so it tracks
-     the radius). Strip Leaflet's chrome and pass pointer events through. */
-  .leaflet-tooltip.seen-marker {
-    background: transparent !important;
-    border: none !important;
-    box-shadow: none !important;
-    padding: 0 !important;
-    margin: 0 !important;
-    font-size: 12px;
-    line-height: 1;
-    pointer-events: none;
-    white-space: nowrap;
-    text-shadow: 0 0 2px rgba(255,255,255,0.9);
+  /* Each pin is rendered as a single SVG inside a Leaflet divIcon — circle
+     + optional "T" overlay are siblings in the same <svg>, so any glyph
+     stays locked to the marker through zoom transitions and DOM updates. */
+  .leaflet-div-icon.pin-icon {
+    background: transparent;
+    border: none;
+    margin: 0;
+    padding: 0;
   }
-  .leaflet-tooltip.seen-marker::before { display: none !important; }
-  /* Tomträtt overlay — a bold "T" centered over the marker. divIcon so
-     the SVG scales crisply across zoom levels and pointer events pass
-     through to the circleMarker beneath. */
-  .tomratt-overlay {
-    background: transparent !important;
-    border: none !important;
-    pointer-events: none;
-  }
-  .tomratt-overlay svg { display: block; width: 100%; height: 100%; }
+  .leaflet-div-icon.pin-icon svg { display: block; width: 100%; height: 100%; }
   .deal-na   { background: #eee;    color: #777; }
 </style>
 </head>
@@ -647,43 +632,72 @@ sorted.forEach((d, i) => {
   rows.push(li);
 });
 
-// Marker style by status. Active/kommande use the current deal-color scheme;
-// sold pins keep the same hue but on the realized (sold-vs-predicted) axis,
-// rendered as a colored ring on a pale fill so they read as "outcome" not
-// "opportunity". Withdrawn pins are faded gray with a dashed ring.
-function pinStyle(d) {
-  let s;
+// Pin geometry. Active/kommande use deal-color; sold pins keep the same hue
+// but on the realized-deal axis with a pale fill so they read as "outcome",
+// not "opportunity"; withdrawn pins are gray with a dashed ring. All variants
+// are rendered as a single SVG so any glyph overlay (e.g. tomträtt "T") is a
+// sibling of the circle — they share one transform/animation during zoom.
+function pinParams(d) {
+  let r = 9, weight = 2, fill = dealColor(d.deal_pct), fillOpacity = 0.95,
+      stroke = 'white', dashArray = '';
   if (d.status === 'sold') {
-    const r = d.realized_deal_pct;
-    s = {
-      radius: 8, weight: 2.5,
-      color: r != null ? dealColor(r) : '#888',
-      fillColor: '#e9e9e9', fillOpacity: 0.9
-    };
+    r = 8; weight = 2.5;
+    const rp = d.realized_deal_pct;
+    stroke = rp != null ? dealColor(rp) : '#888';
+    fill = '#e9e9e9'; fillOpacity = 0.9;
   } else if (d.status === 'withdrawn') {
-    s = {
-      radius: 7, weight: 1.5,
-      color: '#888', dashArray: '3,3',
-      fillColor: '#bbb', fillOpacity: 0.45
-    };
-  } else {
-    s = {
-      radius: 9, weight: 2,
-      color: d.status === 'kommande' ? '#222' : 'white',
-      fillColor: dealColor(d.deal_pct), fillOpacity: 0.95
-    };
+    r = 7; weight = 1.5;
+    stroke = '#888'; dashArray = '3,3';
+    fill = '#bbb'; fillOpacity = 0.45;
+  } else if (d.status === 'kommande') {
+    stroke = '#222';
   }
-  // Tomträtt: keep the deal-color fill so the score is still readable, and
-  // overlay a black "T" via a separate divIcon marker (ensureTomrattOverlay).
-  // Reason: the model is now BRF-aware and can score tomträtt sensibly;
-  // we just want the user to notice the ownership form for due-diligence.
-  // Liked overrides the border with gold so the marker pops. Seen state is
-  // rendered separately as a transparent eye-emoji tooltip (ensureSeenOverlay).
   if (likedSet.has(d.href)) {
-    s.color = '#f59e0b';
-    s.weight = Math.max(s.weight, 3);
+    stroke = '#f59e0b';
+    weight = Math.max(weight, 3);
   }
-  return s;
+  return { r, weight, fill, fillOpacity, stroke, dashArray };
+}
+
+function buildPinIcon(d) {
+  const p = pinParams(d);
+  const seen = seenSet.has(d.href);
+  // "Seen" 👀 extends past the circle into the bottom-right corner, so the
+  // SVG box has extra room on those sides — otherwise the emoji would get
+  // clipped at the icon boundary. iconAnchor still points at the circle
+  // center so the marker registers at the correct lat/lon.
+  const pad = 1;                 // margin on the stroke side
+  const seenPad = seen ? 6 : 0;  // extra room on bottom-right when 👀 is on
+  const size = p.r * 2 + p.weight + pad * 2 + seenPad;
+  const c = p.r + p.weight / 2 + pad;          // circle center within box
+  const dash = p.dashArray ? ` stroke-dasharray="${p.dashArray}"` : '';
+  let svg = `<svg viewBox="0 0 ${size} ${size}" xmlns="http://www.w3.org/2000/svg">`
+          + `<circle cx="${c}" cy="${c}" r="${p.r}" fill="${p.fill}" `
+          + `fill-opacity="${p.fillOpacity}" stroke="${p.stroke}" `
+          + `stroke-width="${p.weight}"${dash}/>`;
+  if (d.is_tomratt) {
+    // T glyph sized ~140% of the circle radius — bold + white halo so it
+    // reads against any deal-color background. y-offset 0.36×fontSize
+    // visually centers the cap-height baseline.
+    const fs = p.r * 1.4;
+    svg += `<text x="${c}" y="${c + fs * 0.36}" text-anchor="middle" `
+        +  `font-family="-apple-system,system-ui,sans-serif" font-weight="900" `
+        +  `font-size="${fs}" fill="#000" stroke="#fff" stroke-width="0.8" `
+        +  `paint-order="stroke fill">T</text>`;
+  }
+  if (seen) {
+    // 👀 anchored at the bottom-right diagonal of the circle. Sized ~80% of
+    // the radius so it reads as a corner badge, not a label.
+    const ex = c + p.r * 0.7, ey = c + p.r * 0.7;
+    const efs = p.r * 1.2;
+    svg += `<text x="${ex}" y="${ey + efs * 0.36}" text-anchor="middle" `
+        +  `font-size="${efs}">👀</text>`;
+  }
+  svg += `</svg>`;
+  return L.divIcon({
+    html: svg, className: 'pin-icon',
+    iconSize: [size, size], iconAnchor: [c, c],
+  });
 }
 
 // Pass 2: build markers in REVERSE order (worst deals first, best on top).
@@ -693,55 +707,20 @@ function syncLikeButton(btn, href) {
   btn.textContent = liked ? '★' : '☆';
 }
 
-// Spawn a centered SVG "T" overlay marker at the same lat/lon as the
-// circleMarker. SVG viewBox + 100%-width CSS makes the T render crisply
-// at any zoom; iconAnchor centers the icon on its lat/lon point.
-// stroke + white halo keeps it readable on red/yellow/green fills alike.
-const TOMRATT_SVG = (
-  '<svg viewBox="0 0 14 14" xmlns="http://www.w3.org/2000/svg">' +
-  '<text x="7" y="11" text-anchor="middle" font-family="-apple-system,system-ui,sans-serif" ' +
-  'font-weight="900" font-size="13" fill="#000" stroke="#fff" stroke-width="0.6" ' +
-  'paint-order="stroke fill">T</text></svg>'
-);
-function ensureTomrattOverlay(map, lat, lon) {
-  const icon = L.divIcon({
-    html: TOMRATT_SVG, className: 'tomratt-overlay',
-    iconSize: [14, 14], iconAnchor: [7, 7],
-  });
-  return L.marker([lat, lon], { icon, interactive: false, keyboard: false }).addTo(map);
-}
-
-// Pin the eye emoji on the marker. Idempotent — calling twice is harmless.
-// Position bottom-right by offsetting ~0.7 * radius along both axes (the
-// 45° diagonal of the circle), so the eye sits at ~quarter-marker size
-// in the corner regardless of which status radius we got.
-function ensureSeenOverlay(marker) {
-  if (marker._seenOverlay) return;
-  const r = (marker.options && marker.options.radius) || 9;
-  const off = Math.round(r * 0.7);
-  marker.bindTooltip('👀', {
-    permanent: true, direction: 'center',
-    className: 'seen-marker', offset: [off, off],
-  }).openTooltip();
-  marker._seenOverlay = true;
-}
-
-function markSeen(href, marker) {
-  if (seenSet.has(href)) return;
-  seenSet.add(href);
+function markSeen(d, marker) {
+  if (seenSet.has(d.href)) return;
+  seenSet.add(d.href);
   saveStore(STORE_SEEN, seenSet);
-  if (marker) ensureSeenOverlay(marker);
+  // Rebuild the icon so the 👀 corner badge renders as a sibling of the
+  // circle in the same SVG (shared transform during zoom transitions).
+  if (marker) marker.setIcon(buildPinIcon(d));
 }
 
 for (let i = sorted.length - 1; i >= 0; i--) {
   const d = sorted[i];
   if (d.lat == null || d.lon == null) continue;
-  const m = L.circleMarker([d.lat, d.lon], pinStyle(d)).addTo(map);
+  const m = L.marker([d.lat, d.lon], { icon: buildPinIcon(d) }).addTo(map);
   m.bindPopup(popupHtml(d), { maxWidth: 280, autoPan: false });
-  if (seenSet.has(d.href)) ensureSeenOverlay(m);
-  // Attach the tomträtt T-overlay as a sibling of the circleMarker so
-  // updateVisibility can add/remove both together when filters change.
-  if (d.is_tomratt) m._tomrattOverlay = ensureTomrattOverlay(map, d.lat, d.lon);
   m.on('popupopen', (e) => {
     selectIndex(i, { fromMap: true });
     // bindPopup caches HTML — re-sync the star icon and re-attach
@@ -757,7 +736,7 @@ for (let i = sorted.length - 1; i >= 0; i--) {
         else likedSet.add(d.href);
         saveStore(STORE_LIKED, likedSet);
         syncLikeButton(btn, d.href);
-        m.setStyle(pinStyle(d));
+        m.setIcon(buildPinIcon(d));
         const row = rows[i];
         if (row) row.classList.toggle('liked', likedSet.has(d.href));
       };
@@ -765,7 +744,7 @@ for (let i = sorted.length - 1; i >= 0; i--) {
     // Mark as seen only when the user actually opens the Hemnet link —
     // skimming popups doesn't count as having reviewed the listing.
     const link = popupEl.querySelector('.popup-link');
-    if (link) link.onclick = () => markSeen(d.href, m);
+    if (link) link.onclick = () => markSeen(d, m);
   });
   markers[i] = m;
 }
@@ -953,13 +932,8 @@ function updateVisibility() {
                      && passesFeatureFilter(d) && passesOwnershipFilter(d);
     if (marker) {
       const onMap = map.hasLayer(marker);
-      if (filterOk && !onMap) {
-        marker.addTo(map);
-        if (marker._tomrattOverlay) marker._tomrattOverlay.addTo(map);
-      } else if (!filterOk && onMap) {
-        map.removeLayer(marker);
-        if (marker._tomrattOverlay) map.removeLayer(marker._tomrattOverlay);
-      }
+      if (filterOk && !onMap) marker.addTo(map);
+      else if (!filterOk && onMap) map.removeLayer(marker);
     }
     if (!row) continue;
     const hasCoords = d.lat != null && d.lon != null;

@@ -23,8 +23,8 @@ cd "$(dirname "$0")"
 # RESROBOT_KEY, HEMNET_USER_AGENT). `set -a` exports every assignment.
 [[ -f .env ]] && { set -a; source .env; set +a; }
 
-ONSALE_URL="${ONSALE_URL:-https://www.hemnet.se/bostader?price_max=8000000&living_area_min=60&rooms_min=2.5&location_ids%5B%5D=18031}"
-KOMMANDE_URL="${KOMMANDE_URL:-https://www.hemnet.se/kommande/bostader?price_max=8000000&living_area_min=60&rooms_min=2.5&location_ids%5B%5D=18031}"
+ONSALE_URL="${ONSALE_URL:-https://www.hemnet.se/bostader?price_max=8500000&living_area_min=60&rooms_min=2.5&location_ids%5B%5D=18031}"
+KOMMANDE_URL="${KOMMANDE_URL:-https://www.hemnet.se/kommande/bostader?price_max=8500000&living_area_min=60&rooms_min=2.5&location_ids%5B%5D=18031}"
 CDP_PORT="${CDP_PORT:-9223}"
 USER_DATA="${USER_DATA:-/tmp/chromium-onsale}"
 # PARALLEL=10 cuts first-of-day runs from ~60 min to ~6 min. Drop to 4 on

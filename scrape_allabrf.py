@@ -50,6 +50,19 @@ ADDR_SITEMAPS = [
     for i in ["", "1", "2", "3", "4", "5"]
 ]
 
+# Only resolve addresses whose listing area contains one of these substrings.
+# Matches the 6 kommun-IDs in update.sh: Stockholm (18031), Danderyd (17892),
+# Lidingö (17846), Nacka (17853), plus 18028 and 18042. Keep mirrored with
+# brf_join.STOCKHOLM_AREA_TOKENS for the join-side guard.
+ALLOWED_AREA_TOKENS = (
+    "Stockholms kommun",
+    "Danderyds kommun",
+    "Lidingö kommun",
+    "Nacka kommun",
+    "Sundbybergs kommun",  # 18028 (best guess; harmless if wrong — listings just won't match)
+    "Solna kommun",        # 18042 (ditto)
+)
+
 
 def slug_from_street(addr: str | None) -> str | None:
     """Hemnet address ("Storgatan 5, 2 tr") → allabrf slug ("storgatan-5").
@@ -103,8 +116,8 @@ def collect_addresses(paths: list[str]) -> dict[str, dict]:
                 except Exception:
                     continue
                 area = r.get("area") or ""
-                if "Stockholms kommun" not in area:
-                    continue  # narrow scope; expand later if needed
+                if not any(k in area for k in ALLOWED_AREA_TOKENS):
+                    continue  # outside our 6-kommun catchment
                 slug = slug_from_street(r.get("address"))
                 if not slug or slug in seen:
                     continue

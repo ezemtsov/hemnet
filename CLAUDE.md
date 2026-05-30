@@ -171,11 +171,13 @@ files being on the server.
 
 ## Filter scope
 
-Currently `location_ids[]=18031` (Stockholms kommun). Was `898741`
-(inom-tullarna) until 2026-05-14, expanded because the user's school
-constraint is kommun-bounded (kommunal schools tie to hemkommun → moving
-across municipal boundary forces school change). Don't suggest expansion to
-Solna/Sundbyberg/Nacka/Lidingö unless user reopens the school question.
+Currently 6 location_ids: Stockholm (18031), Danderyd (17892), Lidingö
+(17846), Nacka (17853), plus 18028 and 18042 (added 2026-05-30 — confirm
+with user before naming in docs). History: `898741` (inom-tullarna) until
+2026-05-14 → 18031 only (kommun-wide Stockholm) → multi-kommun on
+2026-05-30. The kommun-boundary used to be hard (daughter's kommunal
+school tied to hemkommun); the user reopened that constraint when
+expanding here, so don't argue against multi-kommun listings.
 
 Hemnet pagination caps at 2500 rows; with the wider filter the sold scrape
 hits this cap and we get the newest ~7 months instead of 12. Fine for

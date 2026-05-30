@@ -42,8 +42,9 @@ BRF_FIELDS = (
 # cross-city collision and gets skipped. Cheap heuristic, but eliminates the
 # false positives we saw during the scrape (ramundberget / nykoping / tierp / ...).
 STOCKHOLM_AREA_TOKENS = (
-    "Stockholms kommun", "Sundbybergs kommun", "Solna kommun",
-    "Nacka kommun", "Lidingö kommun", "Huddinge kommun", "Järfälla kommun",
+    "Stockholms kommun", "Danderyds kommun", "Lidingö kommun",
+    "Nacka kommun", "Sundbybergs kommun", "Solna kommun",
+    "Huddinge kommun", "Järfälla kommun",
 )
 
 # BRF slugs whose tail token implies they're located outside the Stockholm region.

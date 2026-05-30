@@ -51,10 +51,9 @@
   /* Per-group accent — keeps it obvious which row each button belongs to
      as the filter set grows. Type stays on the default blue. */
   .fg-status    .filter-btn.active { background: #1f9930; border-color: #1f9930; }
-  .fg-region    .filter-btn.active { background: #7c3aed; border-color: #7c3aed; }
+  .fg-location  .filter-btn.active { background: #7c3aed; border-color: #7c3aed; }
   .fg-feature   .filter-btn.active { background: #d97706; border-color: #d97706; }
   .fg-ownership .filter-btn.active { background: #444;    border-color: #444;    }
-  .fg-kommun    .filter-btn.active { background: #0d9488; border-color: #0d9488; }
   .filter-btn .count { opacity: 0.7; }
   ul#list { list-style: none; padding: 0; margin: 0; }
   li.row { padding: 10px 14px; border-bottom: 1px solid #eee; cursor: pointer; transition: background .12s; }
@@ -648,12 +647,32 @@ const STATUS_FILTERS = [
   { key: 'withdrawn', label: 'Borttagna', defaultOn: false },
 ];
 
-// Region filter — inner/outer split matches score.py's INOM_TULLARNA set
-// (carried on each row as `region` ∈ {inner, outer}).
-const REGION_FILTERS = [
-  { key: 'inner', label: 'Inom tullarna' },
-  { key: 'outer', label: 'Utom tullarna' },
+// Location filter — one row of mutually-exclusive geographic segments.
+// Each listing belongs to exactly one bucket:
+//   - "inom" / "utom": Stockholms kommun, split by region (inner/outer
+//     tullarna — region comes from score.py's INOM_TULLARNA classifier).
+//   - The other five: kommun match on the listing's `area` string.
+// Replaces the old Region (inom/utom) + Kommun rows, which used to AND
+// together in non-intuitive ways once the catchment grew past Stockholm.
+const LOCATION_FILTERS = [
+  { key: 'inom',       label: 'Inom tullarna'                                  },
+  { key: 'utom',       label: 'Stockholm utom'                                 },
+  { key: 'Danderyd',   label: 'Danderyd',   kommun_re: /Danderyds kommun/      },
+  { key: 'Lidingö',    label: 'Lidingö',    kommun_re: /Lidingö kommun/        },
+  { key: 'Nacka',      label: 'Nacka',      kommun_re: /Nacka kommun/          },
+  { key: 'Solna',      label: 'Solna',      kommun_re: /Solna kommun/          },
+  { key: 'Sundbyberg', label: 'Sundbyberg', kommun_re: /Sundbybergs kommun/    },
 ];
+function locationOf(d) {
+  const area = d.area || '';
+  if (/Stockholms kommun/.test(area)) {
+    return d.region === 'inner' ? 'inom' : 'utom';
+  }
+  for (const k of LOCATION_FILTERS) {
+    if (k.kommun_re && k.kommun_re.test(area)) return k.key;
+  }
+  return null;
+}
 
 // Feature filter — Hemnet checkbox-tagged amenities from the list page
 // (currently Balkong / Hiss / Uteplats; we only surface the ones that
@@ -671,22 +690,6 @@ const OWNERSHIP_FILTERS = [
   { key: 'tomtratt', label: 'Tomträtt'    },
 ];
 
-// Kommun filter — the catchment is currently 6 kommuner. Match against the
-// listing's `area` string ("…, Nacka kommun"). The genitive -s suffix is
-// included in the regex where applicable (Stockholms, Danderyds, Sundbybergs).
-const KOMMUN_FILTERS = [
-  { key: 'Stockholm',  label: 'Stockholm',  re: /Stockholms kommun/  },
-  { key: 'Danderyd',   label: 'Danderyd',   re: /Danderyds kommun/   },
-  { key: 'Lidingö',    label: 'Lidingö',    re: /Lidingö kommun/     },
-  { key: 'Nacka',      label: 'Nacka',      re: /Nacka kommun/       },
-  { key: 'Solna',      label: 'Solna',      re: /Solna kommun/       },
-  { key: 'Sundbyberg', label: 'Sundbyberg', re: /Sundbybergs kommun/ },
-];
-function kommunOf(d) {
-  const area = d.area || '';
-  for (const k of KOMMUN_FILTERS) if (k.re.test(area)) return k.key;
-  return null;
-}
 
 // Filter selection persists in localStorage so the user doesn't have to
 // re-pick after every refresh. Fall back to per-group defaults when
@@ -705,47 +708,43 @@ function saveFilters() {
       regions:   [...selectedRegions],
       features:  [...selectedFeatures],
       ownership: [...selectedOwnership],
-      kommuner:  [...selectedKommuner],
+      locations: [...selectedLocations],
     }));
   } catch (_e) { /* quota / disabled — silently no-op */ }
 }
 const savedFilters = loadFilters();
 const selectedGroups    = new Set(savedFilters?.groups    ?? TYPE_GROUPS.map(g => g.key));
 const selectedStatuses  = new Set(savedFilters?.statuses  ?? STATUS_FILTERS.filter(s => s.defaultOn).map(s => s.key));
-const selectedRegions   = new Set(savedFilters?.regions   ?? REGION_FILTERS.map(r => r.key));
 const selectedFeatures  = new Set(savedFilters?.features  ?? []);
 const selectedOwnership = new Set(savedFilters?.ownership ?? OWNERSHIP_FILTERS.map(o => o.key));
-const selectedKommuner  = new Set(savedFilters?.kommuner  ?? KOMMUN_FILTERS.map(k => k.key));
+const selectedLocations = new Set(savedFilters?.locations ?? LOCATION_FILTERS.map(l => l.key));
 
 // Pre-compute counts.
-const groupCounts = {}, statusCounts = {}, regionCounts = {}, featureCounts = {}, ownershipCounts = {}, kommunCounts = {};
+const groupCounts = {}, statusCounts = {}, locationCounts = {}, featureCounts = {}, ownershipCounts = {};
 sorted.forEach(d => {
   const g = groupOf.get(d.bostadstyp);
   if (g) groupCounts[g] = (groupCounts[g] || 0) + 1;
   const s = d.status || 'onsale';
   statusCounts[s] = (statusCounts[s] || 0) + 1;
-  if (d.region) regionCounts[d.region] = (regionCounts[d.region] || 0) + 1;
   (d.tags || []).forEach(t => { featureCounts[t] = (featureCounts[t] || 0) + 1; });
   const ok = d.is_tomratt ? 'tomtratt' : 'br';
   ownershipCounts[ok] = (ownershipCounts[ok] || 0) + 1;
-  const km = kommunOf(d);
-  if (km) kommunCounts[km] = (kommunCounts[km] || 0) + 1;
+  const loc = locationOf(d);
+  if (loc) locationCounts[loc] = (locationCounts[loc] || 0) + 1;
 });
 
 // Render two filter rows: property type (with icons) and status (text-only).
 const filtersEl = document.getElementById('filters');
 const typeRow      = document.createElement('div'); typeRow.className      = 'filter-group fg-type';
 const statusRow    = document.createElement('div'); statusRow.className    = 'filter-group fg-status';
-const regionRow    = document.createElement('div'); regionRow.className    = 'filter-group fg-region';
+const locationRow  = document.createElement('div'); locationRow.className  = 'filter-group fg-location';
 const featureRow   = document.createElement('div'); featureRow.className   = 'filter-group fg-feature';
 const ownershipRow = document.createElement('div'); ownershipRow.className = 'filter-group fg-ownership';
-const kommunRow    = document.createElement('div'); kommunRow.className    = 'filter-group fg-kommun';
 filtersEl.appendChild(typeRow);
 filtersEl.appendChild(statusRow);
-filtersEl.appendChild(regionRow);
+filtersEl.appendChild(locationRow);
 filtersEl.appendChild(featureRow);
 filtersEl.appendChild(ownershipRow);
-filtersEl.appendChild(kommunRow);
 
 function makeFilterButton(label, count, selectedSet, key, iconHtml) {
   const btn = document.createElement('button');
@@ -782,9 +781,9 @@ STATUS_FILTERS.forEach(s => {
   if (!statusCounts[s.key]) return;
   statusRow.appendChild(makeFilterButton(s.label, statusCounts[s.key], selectedStatuses, s.key));
 });
-REGION_FILTERS.forEach(r => {
-  if (!regionCounts[r.key]) return;
-  regionRow.appendChild(makeFilterButton(r.label, regionCounts[r.key], selectedRegions, r.key));
+LOCATION_FILTERS.forEach(l => {
+  if (!locationCounts[l.key]) return;
+  locationRow.appendChild(makeFilterButton(l.label, locationCounts[l.key], selectedLocations, l.key));
 });
 FEATURE_FILTERS.forEach(f => {
   if (!featureCounts[f.key]) return;
@@ -793,10 +792,6 @@ FEATURE_FILTERS.forEach(f => {
 OWNERSHIP_FILTERS.forEach(o => {
   if (!ownershipCounts[o.key]) return;
   ownershipRow.appendChild(makeFilterButton(o.label, ownershipCounts[o.key], selectedOwnership, o.key));
-});
-KOMMUN_FILTERS.forEach(k => {
-  if (!kommunCounts[k.key]) return;
-  kommunRow.appendChild(makeFilterButton(k.label, kommunCounts[k.key], selectedKommuner, k.key));
 });
 
 function passesTypeFilter(d) {
@@ -807,9 +802,11 @@ function passesTypeFilter(d) {
 function passesStatusFilter(d) {
   return selectedStatuses.has(d.status || 'onsale');
 }
-function passesRegionFilter(d) {
-  // Rows without a region tag (rare; older history records pre-region) pass through.
-  return !d.region || selectedRegions.has(d.region);
+function passesLocationFilter(d) {
+  const loc = locationOf(d);
+  // Rows whose area doesn't match any segment (e.g. older ghosts with
+  // missing area strings) pass through rather than being silently hidden.
+  return !loc || selectedLocations.has(loc);
 }
 function passesFeatureFilter(d) {
   // Empty selection = no feature filter applied (everything passes). Otherwise
@@ -823,13 +820,6 @@ function passesFeatureFilter(d) {
 function passesOwnershipFilter(d) {
   return selectedOwnership.has(d.is_tomratt ? 'tomtratt' : 'br');
 }
-function passesKommunFilter(d) {
-  const k = kommunOf(d);
-  // Listings whose area doesn't match any of the 6 kommun patterns fall
-  // through (no kommun-tag, no filtering) rather than getting silently
-  // hidden — keeps ghost rows from older runs visible.
-  return !k || selectedKommuner.has(k);
-}
 
 // Hide sidebar rows that fall outside the current map viewport or don't
 // match the selected property-type filters. Map markers reflect only the
@@ -839,8 +829,8 @@ function updateVisibility() {
   let visible = 0;
   for (let i = 0; i < sorted.length; i++) {
     const d = sorted[i], row = rows[i], marker = markers[i];
-    const filterOk = passesTypeFilter(d) && passesStatusFilter(d) && passesRegionFilter(d)
-                     && passesFeatureFilter(d) && passesOwnershipFilter(d) && passesKommunFilter(d);
+    const filterOk = passesTypeFilter(d) && passesStatusFilter(d) && passesLocationFilter(d)
+                     && passesFeatureFilter(d) && passesOwnershipFilter(d);
     if (marker) {
       const onMap = map.hasLayer(marker);
       if (filterOk && !onMap) marker.addTo(map);

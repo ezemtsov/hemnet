@@ -364,11 +364,31 @@ TBANA.stations.forEach(s => {
     fillColor: '#666', fillOpacity: 0.85,
   }).bindTooltip(s.name, { direction: 'top', offset: [0, -4] }).addTo(map);
 });
+// "Highly-available water" zones — translucent teal disks around each fast
+// pendelbåt stop. A property inside a disk is roughly a 7-minute walk
+// (~600 m, ferry-station-to-door) from a boat that reaches Slussen in
+// ≤ 20 min. Overlapping disks naturally bloom into a single zone, giving
+// a glanceable map of "good ferry access" without an explicit heatmap layer.
+const WATER_FAST_MIN = 20;
+const WATER_RADIUS_M = 600;
 (TBANA.ferries || []).forEach(f => {
+  if (f.min_to_slussen != null && f.min_to_slussen <= WATER_FAST_MIN) {
+    L.circle([f.lat, f.lon], {
+      radius: WATER_RADIUS_M,
+      stroke: false,
+      fillColor: '#0d9488',
+      // Faster stops get a stronger tint; slower (16-20 min) just a hint.
+      fillOpacity: f.min_to_slussen <= 10 ? 0.18 : 0.10,
+      interactive: false,
+    }).addTo(map);
+  }
+});
+(TBANA.ferries || []).forEach(f => {
+  const minLabel = f.min_to_slussen != null ? ` · ${f.min_to_slussen} min` : '';
   L.circleMarker([f.lat, f.lon], {
     radius: 3.5, color: '#fff', weight: 1.5,
     fillColor: '#7aa5cf', fillOpacity: 0.85,
-  }).bindTooltip(f.name, { direction: 'top', offset: [0, -4] }).addTo(map);
+  }).bindTooltip(f.name + minLabel, { direction: 'top', offset: [0, -4] }).addTo(map);
 });
 
 const fmtKr = n => n == null ? '–' : n.toLocaleString('sv-SE') + ' kr';

@@ -29,9 +29,10 @@ ONSALE_CACHE = ROOT / "cache" / "details" / "onsale"
 
 def trim_row(r: dict) -> dict:
     out = {k: r.get(k) for k in POPUP_FIELDS if r.get(k) is not None}
-    # Keep only the first 5 photos to keep the embedded payload reasonable.
+    # Popup only renders the first photo, so embedding more is just payload
+    # bloat — five-photos × 2k listings was adding ~800 KB to index.html.
     if photos := out.get("photos"):
-        out["photos"] = photos[:5]
+        out["photos"] = photos[:1]
     return out
 
 
@@ -744,7 +745,10 @@ for (let i = sorted.length - 1; i >= 0; i--) {
   const d = sorted[i];
   if (d.lat == null || d.lon == null) continue;
   const m = L.marker([d.lat, d.lon], { icon: buildPinIcon(d) }).addTo(map);
-  m.bindPopup(popupHtml(d), { maxWidth: 280, autoPan: false });
+  // Lazy popup: build the HTML the first time the user opens this marker
+  // instead of for all ~2k markers at page-load. Saves ~4 MB JS heap and
+  // shaves visible init time.
+  m.bindPopup(() => popupHtml(d), { maxWidth: 280, autoPan: false });
   m.on('popupopen', (e) => {
     selectIndex(i, { fromMap: true });
     // bindPopup caches HTML — re-sync the star icon and re-attach

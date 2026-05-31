@@ -390,10 +390,24 @@ function parseVisning(s) {
   if ((d - now) / 86400000 < -180) d.setFullYear(now.getFullYear() + 1);
   return d;
 }
-function visningIsUpcoming(s) {
+// View-time display: re-label to "Idag" / "Imorgon" when accurate against
+// the user's clock (regardless of what the scrape originally captured),
+// return the original string for further-out absolute dates, and return
+// null when the visning has already passed.
+function visningDisplay(s) {
   const d = parseVisning(s);
-  if (d === null) return !!s;  // unparseable but present → show; don't lose info
-  return d >= new Date();
+  if (d === null) return s || null;
+  if (d < new Date()) return null;
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const tomorrow = new Date(today); tomorrow.setDate(today.getDate() + 1);
+  const dDay = new Date(d); dDay.setHours(0, 0, 0, 0);
+  // Pull out the time fragment ("kl 17:30" / "kl 13:00–13:30") so we can
+  // pair it with the re-labelled day.
+  const m = s.match(/kl\s+[\d:–\-\s]+/i);
+  const time = m ? m[0].trim() : '';
+  if (dDay.getTime() === today.getTime()) return ('Idag ' + time).trim();
+  if (dDay.getTime() === tomorrow.getTime()) return ('Imorgon ' + time).trim();
+  return s;
 }
 
 function aktaBadge(value) {
@@ -483,7 +497,7 @@ function popupHtml(d) {
     </div>
     ${brfSection}
     <div class="popup-footer">
-      <span>${visningIsUpcoming(d.visning) ? 'Visning: ' + d.visning : ''}</span>
+      <span>${(() => { const v = visningDisplay(d.visning); return v ? 'Visning: ' + v : ''; })()}</span>
       <a class="popup-link" href="${d.href}" target="_blank" rel="noopener">Hemnet →</a>
     </div>
   `;

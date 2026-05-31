@@ -7,7 +7,7 @@ Usage:
 Embeds the listing data inline so the file works with file:// (no server needed).
 Re-run after each on-sale refresh to regenerate.
 """
-import argparse, json
+import argparse, json, re
 from datetime import date
 from pathlib import Path
 
@@ -294,10 +294,12 @@ HTML_TEMPLATE = r"""<!doctype html>
 <script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
 <script>
 const LISTINGS = __DATA__;
-// The date the scrape ran. Relative-date visning strings ("Idag",
-// "Imorgon", "Igår") were set against this — we resolve them at render
-// time so the popup stays correct even when the user opens a stale build.
-const BUILD_DATE = '__BUILD_DATE__';
+// The day the scrape captured visning fields. Visning strings like
+// "Imorgon kl 13:00" are anchored here — Hemnet's "tomorrow" was
+// relative to the scrape day, not today. Resolved from the input
+// filename (live-YYYY-MM-DD…), so this can be one or more days behind
+// the build day when the user hasn't re-scraped today.
+const SCRAPE_DATE = '__SCRAPE_DATE__';
 
 // Per-user state, persisted in localStorage. `seen` is auto-tracked on
 // popup open; `liked` is toggled by the star button in each popup.
@@ -496,7 +498,7 @@ function parseVisning(s) {
                      'igår': -1, 'i går': -1 };
   for (const word in RELATIVE) {
     if (new RegExp('^' + word + '\\b', 'i').test(trimmed)) {
-      const d = new Date(BUILD_DATE);
+      const d = new Date(SCRAPE_DATE);
       d.setDate(d.getDate() + RELATIVE[word]);
       d.setHours(23, 59);
       return d;
@@ -1088,10 +1090,17 @@ def build(in_path_str: str, out_path_str: str | None = None, history_path_str: s
     tbana_path = ROOT / "tbana.json"
     tbana_payload = tbana_path.read_text() if tbana_path.exists() else '{"lines":[],"stations":[]}'
 
+    # SCRAPE_DATE = the day visning fields were captured. That lives in
+    # the input filename (live-YYYY-MM-DD…) and can be one or more days
+    # before build day if the user hasn't run scrape today. Fall back to
+    # today only when the input doesn't expose a date.
+    m = re.search(r"(\d{4}-\d{2}-\d{2})", in_path.name)
+    scrape_date = m.group(1) if m else date.today().isoformat()
+
     html = (HTML_TEMPLATE
             .replace("__DATA__", payload)
             .replace("__TBANA__", tbana_payload)
-            .replace("__BUILD_DATE__", date.today().isoformat()))
+            .replace("__SCRAPE_DATE__", scrape_date))
     out_path.write_text(html)
     size_kb = out_path.stat().st_size / 1024
     ghost_note = f", {len(ghosts)} ghosts from history" if ghosts else ""

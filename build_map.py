@@ -131,6 +131,8 @@ HTML_TEMPLATE = r"""<!doctype html>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
       integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
+<link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css">
+<link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css">
 <style>
   html, body { height: 100%; margin: 0; font-family: -apple-system, system-ui, sans-serif; }
   body { display: flex; }
@@ -288,6 +290,7 @@ HTML_TEMPLATE = r"""<!doctype html>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
         integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+<script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
 <script>
 const LISTINGS = __DATA__;
 
@@ -324,6 +327,19 @@ const map = L.map('map', { zoomSnap: 0.5 }).setView(
   _savedMap ? [_savedMap.lat, _savedMap.lon] : [59.330, 18.067],
   _savedMap ? _savedMap.zoom : 13,
 );
+
+// MarkerCluster reduces ~2k visible markers to a few dozen cluster icons at
+// city zoom, killing the per-pin pan cost. Disable clustering at zoom 15+
+// so once the user is at street level they see individual pins again.
+// chunkedLoading defers initial layout off the main thread.
+const clusterGroup = L.markerClusterGroup({
+  maxClusterRadius: 60,
+  disableClusteringAtZoom: 15,
+  spiderfyOnMaxZoom: false,
+  showCoverageOnHover: false,
+  chunkedLoading: true,
+});
+map.addLayer(clusterGroup);
 // Esri ArcGIS — one of the few tile providers that serve file:// origins
 // without a Referer. If you see a blank map, run `python3 -m http.server`
 // in the project root and open http://localhost:8000/ instead.
@@ -744,7 +760,8 @@ function markSeen(d, marker) {
 for (let i = sorted.length - 1; i >= 0; i--) {
   const d = sorted[i];
   if (d.lat == null || d.lon == null) continue;
-  const m = L.marker([d.lat, d.lon], { icon: buildPinIcon(d) }).addTo(map);
+  const m = L.marker([d.lat, d.lon], { icon: buildPinIcon(d) });
+  clusterGroup.addLayer(m);
   // Lazy popup: build the HTML the first time the user opens this marker
   // instead of for all ~2k markers at page-load. Saves ~4 MB JS heap and
   // shaves visible init time.
@@ -984,9 +1001,9 @@ function updateVisibility() {
     const filterOk = passesTypeFilter(d) && passesStatusFilter(d) && passesLocationFilter(d)
                      && passesFeatureFilter(d) && passesOwnershipFilter(d);
     if (marker) {
-      const onMap = map.hasLayer(marker);
-      if (filterOk && !onMap) marker.addTo(map);
-      else if (!filterOk && onMap) map.removeLayer(marker);
+      const onMap = clusterGroup.hasLayer(marker);
+      if (filterOk && !onMap) clusterGroup.addLayer(marker);
+      else if (!filterOk && onMap) clusterGroup.removeLayer(marker);
     }
     if (!row) continue;
     const hasCoords = d.lat != null && d.lon != null;

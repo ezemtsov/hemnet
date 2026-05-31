@@ -83,13 +83,18 @@ def build_queries(address: str | None, area: str | None) -> list[str]:
             if m:
                 city = m.group(1)
                 break
+    # Append "kommun" explicitly when the city was parsed from "X kommun" —
+    # Mapbox treats the kommun qualifier as an admin-boundary hint and
+    # disambiguates same-named streets across kommuner (e.g. Dianavägen
+    # in Stockholms kommun vs the one in Eknäs/Nacka kommun).
+    city_q = f"{city} kommun" if (area and "kommun" in area) else city
     queries = []
     if hood:
-        queries.append(f"{addr}, {hood}, {city}")
-    queries.append(f"{addr}, {city}")
+        queries.append(f"{addr}, {hood}, {city_q}")
+    queries.append(f"{addr}, {city_q}")
     addr_no_letter = re.sub(r"(\b\d+)[A-Za-z]\b", r"\1", addr)
     if addr_no_letter != addr:
-        queries.append(f"{addr_no_letter}, {city}")
+        queries.append(f"{addr_no_letter}, {city_q}")
     return queries
 
 
@@ -138,6 +143,44 @@ def cache_key(query: str) -> str:
     return hashlib.sha1(query.encode()).hexdigest()[:16]
 
 
+# Rough lat/lon bounding boxes per kommun (min_lat, min_lon, max_lat, max_lon).
+# Used to reject Mapbox results that fall outside the listing's stated kommun
+# — the typical failure mode is a same-named street existing in Stockholms
+# kommun and the listing actually being in Nacka/Lidingö/etc.
+KOMMUN_BBOX = {
+    "Stockholm":   (59.22, 17.82, 59.43, 18.20),
+    "Danderyd":    (59.39, 18.00, 59.46, 18.14),
+    "Lidingö":     (59.34, 18.10, 59.40, 18.27),
+    # Nacka sits south/east of the Saltsjö waterline. North edge tightened
+    # to 59.36 (was 59.37) so the Gärdet area in Stockholms kommun isn't
+    # mistakenly considered Nacka; west edge tightened to 18.10 — Hammarby
+    # canal is the Nacka/Stockholm border, and Hammarby Sjöstad itself is
+    # Stockholm.
+    "Nacka":       (59.26, 18.10, 59.36, 18.42),
+    "Solna":       (59.34, 17.92, 59.40, 18.05),
+    "Sundbyberg":  (59.35, 17.92, 59.41, 18.02),
+}
+
+
+def in_kommun_bbox(lat: float, lon: float, city: str) -> bool:
+    """True if (lat, lon) sits inside the rough bbox for the named kommun,
+    or if we don't have a bbox for that kommun (don't reject unknown)."""
+    bbox = KOMMUN_BBOX.get(city)
+    if not bbox:
+        return True
+    return bbox[0] <= lat <= bbox[2] and bbox[1] <= lon <= bbox[3]
+
+
+def _city_from_area(area: str | None) -> str | None:
+    if not area:
+        return None
+    for p in area.split(","):
+        m = re.match(r"\s*([\wåäöÅÄÖ\-]+?)s?\s+kommun", p)
+        if m:
+            return m.group(1)
+    return None
+
+
 def try_query(q: str, engine_fn, sleep_after: float = 0.0) -> dict | None:
     """Geocode one query with disk cache. Returns the cache entry."""
     cache_path = CACHE_DIR / f"{cache_key(q)}.json"
@@ -157,13 +200,26 @@ def try_query(q: str, engine_fn, sleep_after: float = 0.0) -> dict | None:
 
 def geocode_listing(address: str | None, area: str | None, engine_fn, sleep_after: float
                     ) -> tuple[dict | None, str | None, int]:
-    """Try query candidates in order. Returns (result, used_query, n_attempts)."""
+    """Try query candidates in order. Returns (result, used_query, n_attempts).
+
+    Validates each returned point against the listing's stated kommun via
+    KOMMUN_BBOX — out-of-kommun results fall through to the next query
+    rather than being trusted (Mapbox sometimes resolves same-named
+    streets in the wrong kommun)."""
     attempts = 0
+    expected_city = _city_from_area(area)
     for q in build_queries(address, area):
         attempts += 1
         entry = try_query(q, engine_fn, sleep_after=sleep_after)
-        if entry and entry.get("result"):
-            return entry["result"], q, attempts
+        if not entry or not entry.get("result"):
+            continue
+        r = entry["result"]
+        if expected_city and not in_kommun_bbox(r["lat"], r["lon"], expected_city):
+            # Wrong kommun — almost certainly a same-named-street collision.
+            # Keep the cache entry (next run can still use it for diagnostics)
+            # but don't trust it; fall through to the next query candidate.
+            continue
+        return r, q, attempts
     return None, None, attempts
 
 

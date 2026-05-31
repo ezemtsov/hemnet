@@ -455,6 +455,30 @@ function freshnessColor(iso) {
   return COLOR_NEUTRAL;
 }
 
+// Visning ("Mån 25 maj kl 17:30") was a snapshot at scrape time, so a
+// week-old build will show dates that have already passed. Re-evaluate
+// against the real today at popup-render time so stale visnings vanish
+// without having to rebuild the map.
+const _SV_MONTHS = { jan:1, feb:2, mar:3, apr:4, maj:5, jun:6,
+                     jul:7, aug:8, sep:9, okt:10, nov:11, dec:12 };
+function visningIsUpcoming(s) {
+  if (!s) return false;
+  const m = s.match(/(\d{1,2})\s+([a-zA-ZåäöÅÄÖ]+)/);
+  if (!m) return true;  // unparseable → show it (don't lose info)
+  const month = _SV_MONTHS[m[2].slice(0, 3).toLowerCase()];
+  if (!month) return true;
+  const day = +m[1];
+  const now = new Date();
+  // Anchor at end-of-day so visnings stay visible all day even after
+  // their nominal time. Roll to next year if the parsed month/day is
+  // more than 6 months behind today (the scrape never stamps a year).
+  let cand = new Date(now.getFullYear(), month - 1, day, 23, 59);
+  if ((cand - now) / 86400000 < -180) {
+    cand.setFullYear(now.getFullYear() + 1);
+  }
+  return cand >= now;
+}
+
 function aktaBadge(value) {
   if (value === true)  return `<span style="color:${COLOR_GOOD}" title="Hemnet displays 'Äger marken' — confirmed äkta förening">äkta ✓</span>`;
   if (value === false) return `<span style="color:${COLOR_BAD}">oäkta</span>`;
@@ -542,7 +566,7 @@ function popupHtml(d) {
     </div>
     ${brfSection}
     <div class="popup-footer">
-      <span>${d.visning ? 'Visning: ' + d.visning : ''}</span>
+      <span>${visningIsUpcoming(d.visning) ? 'Visning: ' + d.visning : ''}</span>
       <a class="popup-link" href="${d.href}" target="_blank" rel="noopener">Hemnet →</a>
     </div>
   `;

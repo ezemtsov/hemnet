@@ -44,6 +44,12 @@ def clean_address(address: str) -> str:
         s = new
     s = re.sub(r",\s*[A-ZÅÄÖ][A-ZÅÄÖ \!\.]+!?$", "", s)
     s = re.sub(r",\s*ink\.\s.*$", "", s, flags=re.I)
+    # Strip Hemnet's freeform tail annotations that aren't part of the
+    # postal address — they tend to mislead the geocoder into fuzzy-
+    # matching a different street. ("Etage", "Hörnläge", "Toppvåning"
+    # are common; case-insensitive, only when terminal.)
+    s = re.sub(r",\s*(etage|h(?:ö|o)rnl(?:ä|a)ge|toppv(?:å|a)ning|gathus|g(?:å|a)rdshus|gavel(?:l(?:ä|a)genhet)?)\s*$",
+               "", s, flags=re.I)
     return s.strip().rstrip(",")
 
 
@@ -64,7 +70,12 @@ def build_queries(address: str | None, area: str | None) -> list[str]:
     if area:
         parts = [p.strip() for p in area.split(",")]
         hood_part = parts[0] if parts else ""
-        hood = re.split(r"[/\-–]", hood_part)[0].strip()
+        # Split only on em-dash and slash separators ("Bromma – Beckomberga",
+        # "Söder/Mariatorget"). Regular hyphen "-" is a word constituent in
+        # real Swedish place names (Saltsjö-Boo, Saltsjö-Duvnäs, Hammarby-
+        # Sjöstad), and earlier code that dropped everything after the hyphen
+        # caused mis-geocodings (e.g. Saltsjö-Boo → "Saltsjö" → Lidingö).
+        hood = re.split(r"[/–]", hood_part)[0].strip()
         # Extract the kommun name from "<name>s? kommun". Trailing -s is the
         # Swedish genitive ("Sundbybergs", "Stockholms") — strip it.
         for p in parts[1:]:

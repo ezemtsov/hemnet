@@ -364,31 +364,42 @@ TBANA.stations.forEach(s => {
     fillColor: '#666', fillOpacity: 0.85,
   }).bindTooltip(s.name, { direction: 'top', offset: [0, -4] }).addTo(map);
 });
-// "Highly-available water" zones — translucent teal disks around each fast
+// "Highly-available water" zones — translucent teal disks around each
 // pendelbåt stop. A property inside a disk is roughly a 7-minute walk
-// (~600 m) from a boat that reaches Slussen in ≤ 20 min.
+// (~600 m) from the brygga.
 //
-// Render all disks into a dedicated Leaflet pane and set the pane's CSS
-// opacity once. Inside the pane each disk paints at fillOpacity:1 — where
-// disks overlap, the same teal covers the same teal, then the pane is
-// composited to the map at uniform opacity. Net effect: overlapping disks
-// behave as a single union region instead of stacking into darker patches.
+// Two tiers, each in its own Leaflet pane with pane-level CSS opacity:
+//   fast   (≤20 min boat to Slussen) — strong teal, e.g. Saltsjöqvarn,
+//          Finnboda, Kvarnholmen, Nacka Strand
+//   medium (21-30 min)               — soft teal, e.g. Telegrafberget,
+//          Hasseludden, Dalénum, Klippudden
+//
+// Each pane renders its disks at fillOpacity:1; the pane composites to
+// the map at fixed opacity, so overlapping disks *within* a tier form a
+// clean union (not stacked overlaps). The fast pane sits above the
+// medium pane, so where the two tiers overlap geographically the fast
+// colour wins — the medium tint never "adds darkness" to a fast zone.
 const WATER_FAST_MIN = 20;
+const WATER_MEDIUM_MIN = 30;
 const WATER_RADIUS_M = 600;
-map.createPane('water-access');
-map.getPane('water-access').style.opacity = '0.18';
-map.getPane('water-access').style.pointerEvents = 'none';
+map.createPane('water-medium');
+map.getPane('water-medium').style.opacity = '0.10';
+map.getPane('water-medium').style.zIndex = 405;
+map.getPane('water-medium').style.pointerEvents = 'none';
+map.createPane('water-fast');
+map.getPane('water-fast').style.opacity = '0.20';
+map.getPane('water-fast').style.zIndex = 410;
+map.getPane('water-fast').style.pointerEvents = 'none';
 (TBANA.ferries || []).forEach(f => {
-  if (f.min_to_slussen != null && f.min_to_slussen <= WATER_FAST_MIN) {
-    L.circle([f.lat, f.lon], {
-      pane: 'water-access',
-      radius: WATER_RADIUS_M,
-      stroke: false,
-      fillColor: '#0d9488',
-      fillOpacity: 1.0,
-      interactive: false,
-    }).addTo(map);
-  }
+  if (f.min_to_slussen == null) return;
+  let pane = null;
+  if (f.min_to_slussen <= WATER_FAST_MIN) pane = 'water-fast';
+  else if (f.min_to_slussen <= WATER_MEDIUM_MIN) pane = 'water-medium';
+  if (!pane) return;
+  L.circle([f.lat, f.lon], {
+    pane, radius: WATER_RADIUS_M, stroke: false,
+    fillColor: '#0d9488', fillOpacity: 1.0, interactive: false,
+  }).addTo(map);
 });
 (TBANA.ferries || []).forEach(f => {
   const minLabel = f.min_to_slussen != null ? ` · ${f.min_to_slussen} min` : '';

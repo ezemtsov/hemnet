@@ -8,6 +8,7 @@ Embeds the listing data inline so the file works with file:// (no server needed)
 Re-run after each on-sale refresh to regenerate.
 """
 import argparse, json
+from datetime import date
 from pathlib import Path
 
 from enrich import listing_id
@@ -293,6 +294,10 @@ HTML_TEMPLATE = r"""<!doctype html>
 <script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
 <script>
 const LISTINGS = __DATA__;
+// The date the scrape ran. Relative-date visning strings ("Idag",
+// "Imorgon", "Igår") were set against this — we resolve them at render
+// time so the popup stays correct even when the user opens a stale build.
+const BUILD_DATE = '__BUILD_DATE__';
 
 // Per-user state, persisted in localStorage. `seen` is auto-tracked on
 // popup open; `liked` is toggled by the star button in each popup.
@@ -478,22 +483,41 @@ function freshnessColor(iso) {
 // without having to rebuild the map.
 const _SV_MONTHS = { jan:1, feb:2, mar:3, apr:4, maj:5, jun:6,
                      jul:7, aug:8, sep:9, okt:10, nov:11, dec:12 };
-function visningIsUpcoming(s) {
-  if (!s) return false;
-  const m = s.match(/(\d{1,2})\s+([a-zA-ZåäöÅÄÖ]+)/);
-  if (!m) return true;  // unparseable → show it (don't lose info)
-  const month = _SV_MONTHS[m[2].slice(0, 3).toLowerCase()];
-  if (!month) return true;
-  const day = +m[1];
-  const now = new Date();
-  // Anchor at end-of-day so visnings stay visible all day even after
-  // their nominal time. Roll to next year if the parsed month/day is
-  // more than 6 months behind today (the scrape never stamps a year).
-  let cand = new Date(now.getFullYear(), month - 1, day, 23, 59);
-  if ((cand - now) / 86400000 < -180) {
-    cand.setFullYear(now.getFullYear() + 1);
+// Resolve a visning string ("Imorgon kl 13:00" / "25 maj kl 17:30") to a
+// Date for the *end of that day*. Anchoring at end-of-day so visnings stay
+// visible until midnight of their day rather than vanishing the moment
+// their start time passes. Returns null for strings we can't parse.
+function parseVisning(s) {
+  if (!s) return null;
+  const trimmed = s.trim();
+  // Relative-date words: resolve against BUILD_DATE (scrape day), not the
+  // viewer's clock. "Imorgon" said on scrape-day = scrape-day+1, always.
+  const RELATIVE = { 'idag': 0, 'imorgon': 1, 'i morgon': 1,
+                     'igår': -1, 'i går': -1 };
+  for (const word in RELATIVE) {
+    if (new RegExp('^' + word + '\\b', 'i').test(trimmed)) {
+      const d = new Date(BUILD_DATE);
+      d.setDate(d.getDate() + RELATIVE[word]);
+      d.setHours(23, 59);
+      return d;
+    }
   }
-  return cand >= now;
+  // Absolute "DD månad" form.
+  const m = trimmed.match(/(\d{1,2})\s+([a-zA-ZåäöÅÄÖ]+)/);
+  if (!m) return null;
+  const month = _SV_MONTHS[m[2].slice(0, 3).toLowerCase()];
+  if (!month) return null;
+  const now = new Date();
+  let d = new Date(now.getFullYear(), month - 1, +m[1], 23, 59);
+  // Year inference: roll forward if the parsed month/day is >6 months
+  // in the past (the scrape never stamps a year on the visning).
+  if ((d - now) / 86400000 < -180) d.setFullYear(now.getFullYear() + 1);
+  return d;
+}
+function visningIsUpcoming(s) {
+  const d = parseVisning(s);
+  if (d === null) return !!s;  // unparseable but present → show; don't lose info
+  return d >= new Date();
 }
 
 function aktaBadge(value) {
@@ -1064,7 +1088,10 @@ def build(in_path_str: str, out_path_str: str | None = None, history_path_str: s
     tbana_path = ROOT / "tbana.json"
     tbana_payload = tbana_path.read_text() if tbana_path.exists() else '{"lines":[],"stations":[]}'
 
-    html = HTML_TEMPLATE.replace("__DATA__", payload).replace("__TBANA__", tbana_payload)
+    html = (HTML_TEMPLATE
+            .replace("__DATA__", payload)
+            .replace("__TBANA__", tbana_payload)
+            .replace("__BUILD_DATE__", date.today().isoformat()))
     out_path.write_text(html)
     size_kb = out_path.stat().st_size / 1024
     ghost_note = f", {len(ghosts)} ghosts from history" if ghosts else ""

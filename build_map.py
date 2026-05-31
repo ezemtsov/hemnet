@@ -323,7 +323,7 @@ function loadMapState() {
   return null;
 }
 const _savedMap = loadMapState();
-const map = L.map('map', { zoomSnap: 0.5 }).setView(
+const map = L.map('map', { zoomSnap: 0.5, maxZoom: 19 }).setView(
   _savedMap ? [_savedMap.lat, _savedMap.lon] : [59.330, 18.067],
   _savedMap ? _savedMap.zoom : 13,
 );

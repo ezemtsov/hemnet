@@ -366,19 +366,26 @@ TBANA.stations.forEach(s => {
 });
 // "Highly-available water" zones — translucent teal disks around each fast
 // pendelbåt stop. A property inside a disk is roughly a 7-minute walk
-// (~600 m, ferry-station-to-door) from a boat that reaches Slussen in
-// ≤ 20 min. Overlapping disks naturally bloom into a single zone, giving
-// a glanceable map of "good ferry access" without an explicit heatmap layer.
+// (~600 m) from a boat that reaches Slussen in ≤ 20 min.
+//
+// Render all disks into a dedicated Leaflet pane and set the pane's CSS
+// opacity once. Inside the pane each disk paints at fillOpacity:1 — where
+// disks overlap, the same teal covers the same teal, then the pane is
+// composited to the map at uniform opacity. Net effect: overlapping disks
+// behave as a single union region instead of stacking into darker patches.
 const WATER_FAST_MIN = 20;
 const WATER_RADIUS_M = 600;
+map.createPane('water-access');
+map.getPane('water-access').style.opacity = '0.18';
+map.getPane('water-access').style.pointerEvents = 'none';
 (TBANA.ferries || []).forEach(f => {
   if (f.min_to_slussen != null && f.min_to_slussen <= WATER_FAST_MIN) {
     L.circle([f.lat, f.lon], {
+      pane: 'water-access',
       radius: WATER_RADIUS_M,
       stroke: false,
       fillColor: '#0d9488',
-      // Faster stops get a stronger tint; slower (16-20 min) just a hint.
-      fillOpacity: f.min_to_slussen <= 10 ? 0.18 : 0.10,
+      fillOpacity: 1.0,
       interactive: false,
     }).addTo(map);
   }

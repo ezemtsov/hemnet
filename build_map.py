@@ -182,6 +182,7 @@ HTML_TEMPLATE = r"""<!doctype html>
   .fg-location  .filter-btn.active { background: #7c3aed; border-color: #7c3aed; }
   .fg-feature   .filter-btn.active { background: #d97706; border-color: #d97706; }
   .fg-ownership .filter-btn.active { background: #444;    border-color: #444;    }
+  .fg-activity  .filter-btn.active { background: #db2777; border-color: #db2777; }
   .filter-btn .count { opacity: 0.7; }
   ul#list { list-style: none; padding: 0; margin: 0; }
   li.row { padding: 10px 14px; border-bottom: 1px solid #eee; cursor: pointer; transition: background .12s; }
@@ -929,6 +930,20 @@ const FEATURE_FILTERS = [
   { key: 'Uteplats', label: 'Uteplats' },
 ];
 
+// Activity filter — show only listings whose state changed on SCRAPE_DATE.
+// "Changed today" = first_seen == today (new) OR the latest asking_history
+// entry was recorded today AND there was a prior entry (a real price move,
+// not the initial price stamp). Off by default; clicking the toggle
+// narrows the map to the day's news.
+const ACTIVITY_FILTERS = [
+  { key: 'today', label: 'Ändrat idag' },
+];
+function changedToday(d) {
+  if (d.first_seen === SCRAPE_DATE) return true;
+  const h = d.asking_history;
+  return Array.isArray(h) && h.length >= 2 && h[h.length - 1][0] === SCRAPE_DATE;
+}
+
 // Ownership filter — Bostadsrätt vs Tomträtt. Both active by default;
 // untoggle Tomträtt to hide leasehold-land listings (their deal_pct
 // is unreliable because the model can't see ground-rent burden).
@@ -956,6 +971,7 @@ function saveFilters() {
       features:  [...selectedFeatures],
       ownership: [...selectedOwnership],
       locations: [...selectedLocations],
+      activity:  [...selectedActivity],
     }));
   } catch (_e) { /* quota / disabled — silently no-op */ }
 }
@@ -965,9 +981,10 @@ const selectedStatuses  = new Set(savedFilters?.statuses  ?? STATUS_FILTERS.filt
 const selectedFeatures  = new Set(savedFilters?.features  ?? []);
 const selectedOwnership = new Set(savedFilters?.ownership ?? OWNERSHIP_FILTERS.map(o => o.key));
 const selectedLocations = new Set(savedFilters?.locations ?? LOCATION_FILTERS.map(l => l.key));
+const selectedActivity  = new Set(savedFilters?.activity  ?? []);
 
 // Pre-compute counts.
-const groupCounts = {}, statusCounts = {}, locationCounts = {}, featureCounts = {}, ownershipCounts = {};
+const groupCounts = {}, statusCounts = {}, locationCounts = {}, featureCounts = {}, ownershipCounts = {}, activityCounts = {};
 sorted.forEach(d => {
   const g = groupOf.get(d.bostadstyp);
   if (g) groupCounts[g] = (groupCounts[g] || 0) + 1;
@@ -978,6 +995,7 @@ sorted.forEach(d => {
   ownershipCounts[ok] = (ownershipCounts[ok] || 0) + 1;
   const loc = locationOf(d);
   if (loc) locationCounts[loc] = (locationCounts[loc] || 0) + 1;
+  if (changedToday(d)) activityCounts['today'] = (activityCounts['today'] || 0) + 1;
 });
 
 // Render two filter rows: property type (with icons) and status (text-only).
@@ -987,11 +1005,13 @@ const statusRow    = document.createElement('div'); statusRow.className    = 'fi
 const locationRow  = document.createElement('div'); locationRow.className  = 'filter-group fg-location';
 const featureRow   = document.createElement('div'); featureRow.className   = 'filter-group fg-feature';
 const ownershipRow = document.createElement('div'); ownershipRow.className = 'filter-group fg-ownership';
+const activityRow  = document.createElement('div'); activityRow.className  = 'filter-group fg-activity';
 filtersEl.appendChild(typeRow);
 filtersEl.appendChild(statusRow);
 filtersEl.appendChild(locationRow);
 filtersEl.appendChild(featureRow);
 filtersEl.appendChild(ownershipRow);
+filtersEl.appendChild(activityRow);
 
 function makeFilterButton(label, count, selectedSet, key, iconHtml) {
   const btn = document.createElement('button');
@@ -1040,6 +1060,10 @@ OWNERSHIP_FILTERS.forEach(o => {
   if (!ownershipCounts[o.key]) return;
   ownershipRow.appendChild(makeFilterButton(o.label, ownershipCounts[o.key], selectedOwnership, o.key));
 });
+ACTIVITY_FILTERS.forEach(a => {
+  if (!activityCounts[a.key]) return;
+  activityRow.appendChild(makeFilterButton(a.label, activityCounts[a.key], selectedActivity, a.key));
+});
 
 function passesTypeFilter(d) {
   const g = groupOf.get(d.bostadstyp);
@@ -1067,6 +1091,13 @@ function passesFeatureFilter(d) {
 function passesOwnershipFilter(d) {
   return selectedOwnership.has(d.is_tomratt ? 'tomtratt' : 'br');
 }
+function passesActivityFilter(d) {
+  // Empty selection = no activity filter applied (all pass). Otherwise only
+  // changed-today rows pass; ghosts (sold/withdrawn) are also dropped since
+  // their state didn't change today either.
+  if (selectedActivity.size === 0) return true;
+  return changedToday(d);
+}
 
 // Hide sidebar rows that fall outside the current map viewport or don't
 // match the selected property-type filters. Map markers reflect only the
@@ -1077,7 +1108,7 @@ function updateVisibility() {
   for (let i = 0; i < sorted.length; i++) {
     const d = sorted[i], row = rows[i], marker = markers[i];
     const filterOk = passesTypeFilter(d) && passesStatusFilter(d) && passesLocationFilter(d)
-                     && passesFeatureFilter(d) && passesOwnershipFilter(d);
+                     && passesFeatureFilter(d) && passesOwnershipFilter(d) && passesActivityFilter(d);
     if (marker) {
       const onMap = clusterGroup.hasLayer(marker);
       if (filterOk && !onMap) clusterGroup.addLayer(marker);
@@ -1127,6 +1158,26 @@ def build(in_path_str: str, out_path_str: str | None = None, history_path_str: s
     in_path = Path(in_path_str)
     out_path = Path(out_path_str) if out_path_str else ROOT / "index.html"
     rows = [json.loads(l) for l in open(in_path)]
+
+    # Merge history fields (first_seen, last_seen, asking_history) into active
+    # rows so the popup + activity filter can see them. history.jsonl is the
+    # cross-day ledger; the live snapshot doesn't carry these directly.
+    history_by_id: dict[str, dict] = {}
+    history_path = Path(history_path_str) if history_path_str else None
+    if history_path and history_path.exists():
+        for line in open(history_path):
+            rec = json.loads(line)
+            history_by_id[rec["id"]] = rec
+    for r in rows:
+        if not r.get("href"):
+            continue
+        h = history_by_id.get(listing_id(r["href"]))
+        if not h:
+            continue
+        for k in ("first_seen", "last_seen", "asking_history"):
+            if h.get(k) is not None and r.get(k) is None:
+                r[k] = h[k]
+
     pinned = [trim_row(r) for r in rows if r.get("lat") is not None]
     skipped = len(rows) - len(pinned)
 

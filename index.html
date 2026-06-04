@@ -116,6 +116,24 @@
   .line-badge.stromma  { background: #d6a834; color: #2a1a00; }
   .line-badge.ressels  { background: #4d5a8a; }
   .line-badge.other    { background: #666;    }
+  /* Cluster icon: replicate MarkerCluster's default round two-tone look
+     (40 px outer halo, 30 px solid inner core, white centred count text)
+     but with colours driven by avg deal_pct via inline style — see the
+     iconCreateFunction in the JS block. */
+  .deal-cluster-outer {
+    width: 40px; height: 40px;
+    border-radius: 50%;
+    background-clip: padding-box;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .deal-cluster-inner {
+    width: 30px; height: 30px;
+    border-radius: 50%;
+    text-align: center;
+    color: #fff;
+    font: 600 12px "Helvetica Neue", Arial, sans-serif;
+  }
+  .deal-cluster-inner span { line-height: 30px; }
   /* Favorite (star) button — pinned to the top-right of the popup so it's
      reachable without scrolling and doesn't interfere with the photo. */
   .like-btn {
@@ -231,15 +249,52 @@ const map = L.map('map', { zoomSnap: 0.5, maxZoom: 19 }).setView(
 );
 
 // MarkerCluster reduces ~2k visible markers to a few dozen cluster icons at
-// city zoom, killing the per-pin pan cost. Disable clustering at zoom 15+
-// so once the user is at street level they see individual pins again.
-// chunkedLoading defers initial layout off the main thread.
+// city zoom, killing the per-pin pan cost. The radius is intentionally on
+// the small side (40 px ~ <300 m at city zoom) so neighbouring listings
+// stay distinct rather than collapsing into one big blob — the user
+// wants more individual data points visible. iconCreateFunction renders
+// the average deal_pct of the cluster's children so the colour and
+// label communicate "what kind of deals are hiding here" before the
+// user zooms in. chunkedLoading defers initial layout off the main thread.
 const clusterGroup = L.markerClusterGroup({
-  maxClusterRadius: 60,
+  maxClusterRadius: 40,
   disableClusteringAtZoom: 15,
   spiderfyOnMaxZoom: false,
   showCoverageOnHover: false,
   chunkedLoading: true,
+  iconCreateFunction: (cluster) => {
+    // Same visual character as MarkerCluster's default (round two-tone
+    // blob, count label inside), but the colour is the average deal_pct
+    // of the cluster's children instead of the size-based default.
+    // Withdrawn rows don't contribute (their realized number is a
+    // different metric); clusters with no scored children fall back to
+    // neutral grey.
+    const kids = cluster.getAllChildMarkers();
+    const pcts = [];
+    for (const m of kids) {
+      const p = m.options.deal_pct;
+      if (p != null && m.options.status !== 'withdrawn') pcts.push(p);
+    }
+    const avg = pcts.length
+      ? pcts.reduce((a, b) => a + b, 0) / pcts.length : null;
+    const n = cluster.getChildCount();
+    let outerBg, innerBg;
+    if (avg == null) {
+      outerBg = 'rgba(160,160,160,0.55)';
+      innerBg = 'rgba(140,140,140,0.75)';
+    } else {
+      const hue = dealHue(avg);
+      outerBg = `hsla(${hue},70%,55%,0.5)`;
+      innerBg = `hsla(${hue},70%,42%,0.85)`;
+    }
+    return new L.DivIcon({
+      html: `<div class="deal-cluster-outer" style="background:${outerBg}">` +
+            `<div class="deal-cluster-inner" style="background:${innerBg}">` +
+            `<span>${n}</span></div></div>`,
+      className: '',
+      iconSize: new L.Point(40, 40),
+    });
+  },
 });
 map.addLayer(clusterGroup);
 // Esri ArcGIS — one of the few tile providers that serve file:// origins
@@ -894,7 +949,13 @@ function markSeen(d, marker) {
 for (let i = sorted.length - 1; i >= 0; i--) {
   const d = sorted[i];
   if (d.lat == null || d.lon == null) continue;
-  const m = L.marker([d.lat, d.lon], { icon: buildPinIcon(d) });
+  const m = L.marker([d.lat, d.lon], {
+    icon: buildPinIcon(d),
+    // Stashed on the marker so the cluster icon-create function can read
+    // them without having to look up the listing dict again.
+    deal_pct: d.deal_pct,
+    status: d.status,
+  });
   clusterGroup.addLayer(m);
   // Lazy popup: build the HTML the first time the user opens this marker
   // instead of for all ~2k markers at page-load. Saves ~4 MB JS heap and
@@ -1171,14 +1232,18 @@ function passesActivityFilter(d) {
 function updateVisibility() {
   const bounds = map.getBounds();
   let visible = 0;
+  let membershipChanged = false;
   for (let i = 0; i < sorted.length; i++) {
     const d = sorted[i], row = rows[i], marker = markers[i];
     const filterOk = passesTypeFilter(d) && passesStatusFilter(d) && passesLocationFilter(d)
                      && passesFeatureFilter(d) && passesOwnershipFilter(d) && passesActivityFilter(d);
     if (marker) {
       const onMap = clusterGroup.hasLayer(marker);
-      if (filterOk && !onMap) clusterGroup.addLayer(marker);
-      else if (!filterOk && onMap) clusterGroup.removeLayer(marker);
+      if (filterOk && !onMap) {
+        clusterGroup.addLayer(marker); membershipChanged = true;
+      } else if (!filterOk && onMap) {
+        clusterGroup.removeLayer(marker); membershipChanged = true;
+      }
     }
     if (!row) continue;
     const hasCoords = d.lat != null && d.lon != null;
@@ -1187,6 +1252,13 @@ function updateVisibility() {
     row.style.display = show ? '' : 'none';
     if (show) visible++;
   }
+  // MarkerCluster doesn't rebuild existing cluster icons when individual
+  // markers are added/removed — the count/avg label stays cached until
+  // the next zoom. refreshClusters() forces iconCreateFunction to re-run
+  // against current membership so the displayed average reflects only
+  // the filtered set. Skip it on pan-only updates to avoid the rebuild
+  // cost (visible at ~2k markers).
+  if (membershipChanged) clusterGroup.refreshClusters();
   subEl.textContent = `${visible} of ${sorted.length} in view · ${pinned} pinned · sorted by newest`;
 }
 map.on('moveend', () => {

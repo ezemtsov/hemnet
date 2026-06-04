@@ -808,11 +808,18 @@ function selectIndex(i, { fromMap = false } = {}) {
     row.classList.add('active');
     row.scrollIntoView({ block: 'nearest' });
   }
-  // Map is a geo-filter context (bounds determine which rows show), so
-  // row selection must NOT move it. The bounds filter guarantees a
-  // visible row's pin is already in view; openPopup with autoPan:false
-  // just opens it where it is.
-  if (marker) marker.openPopup();
+  if (!marker) return;
+  // Reliable popup-open even when the marker is hidden inside a cluster.
+  // Bare marker.openPopup() silently does nothing in that case — the
+  // popup briefly opens at the marker's coords but the cluster icon
+  // covers it and we never see it. zoomToShowLayer pans/zooms only as
+  // far as needed to break the marker out of its cluster (no-op if it's
+  // already visible) and then fires the callback.
+  if (clusterGroup.hasLayer(marker)) {
+    clusterGroup.zoomToShowLayer(marker, () => marker.openPopup());
+  } else {
+    marker.openPopup();
+  }
 }
 
 // Pass 1: build sidebar rows in attractiveness order.
